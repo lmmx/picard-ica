@@ -1,0 +1,29 @@
+[package]
+name = "picard-ica"
+version = "0.1.0"
+edition = "2021"
+authors = ["Louis Maddox <louismmx@gmail.com>"]
+description = "Preconditioned ICA for Real Data - Fast Independent Component Analysis"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lmmx/picard-ica"
+documentation = "https://docs.rs/picard-ica"
+readme = "README.md"
+keywords = ["ica", "signal-processing", "machine-learning"]
+categories = ["science", "algorithms", "mathematics"]
+
+[lib]
+name = "picard"
+
+[dependencies]
+ndarray = "0.17"
+num-traits = "0.2"
+
+[dev-dependencies]
+ndarray-rand = "0.16"
+rand = "0.9"
+approx = "0.5"
+criterion = "0.8"
+
+[[bench]]
+name = "benchmarks"
+harness = false
