@@ -58,16 +58,22 @@ pub fn whiten(x: &Array2<f64>, n_components: usize) -> Result<WhiteningResult> {
     }
 
     // SVD decomposition
-    let (u, s, _) = x.svd(true, false).map_err(|e| PicardError::ComputationError {
-        message: format!("SVD failed: {}", e),
-    })?;
+    let (u, s, _) = x
+        .svd(true, false)
+        .map_err(|e| PicardError::ComputationError {
+            message: format!("SVD failed: {}", e),
+        })?;
 
     let u = u.ok_or_else(|| PicardError::ComputationError {
         message: "SVD did not return U matrix".into(),
     })?;
 
     // Check for near-zero singular values
-    let min_sv = s.iter().take(n_components).cloned().fold(f64::INFINITY, f64::min);
+    let min_sv = s
+        .iter()
+        .take(n_components)
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
     if min_sv < 1e-10 {
         return Err(PicardError::SingularMatrix);
     }

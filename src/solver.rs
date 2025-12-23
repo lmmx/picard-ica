@@ -10,9 +10,9 @@ use crate::whitening::{center, whiten};
 
 use ndarray::{Array2, Axis};
 use rand::prelude::*;
-use rand_distr::StandardNormal;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand_distr::StandardNormal;
 
 /// The PICARD Independent Component Analysis solver.
 ///
@@ -81,7 +81,10 @@ impl Picard {
         // Whiten the data
         let (x1, k) = if config.whiten {
             let whitening_result = whiten(&x1, n_components)?;
-            (whitening_result.data, Some(whitening_result.whitening_matrix))
+            (
+                whitening_result.data,
+                Some(whitening_result.whitening_matrix),
+            )
         } else {
             (x1, None)
         };

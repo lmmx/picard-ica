@@ -22,7 +22,7 @@ impl LbfgsMemory {
             s_list: Vec::with_capacity(max_size),
             y_list: Vec::with_capacity(max_size),
             r_list: Vec::with_capacity(max_size),
-            max_size
+            max_size,
         }
     }
 

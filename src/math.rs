@@ -12,11 +12,11 @@ use ndarray_linalg::UPLO;
 /// This ensures the rows of W are orthonormal.
 pub fn sym_decorrelation(w: &Array2<f64>) -> Result<Array2<f64>> {
     let ww_t = w.dot(&w.t());
-    let (eigenvalues, eigenvectors) = ww_t
-        .eigh(UPLO::Lower)
-        .map_err(|_| PicardError::ComputationError {
-            message: "Eigendecomposition failed in symmetric decorrelation".into(),
-        })?;
+    let (eigenvalues, eigenvectors) =
+        ww_t.eigh(UPLO::Lower)
+            .map_err(|_| PicardError::ComputationError {
+                message: "Eigendecomposition failed in symmetric decorrelation".into(),
+            })?;
 
     // Check for near-zero eigenvalues
     let min_eigenvalue = eigenvalues.iter().cloned().fold(f64::INFINITY, f64::min);

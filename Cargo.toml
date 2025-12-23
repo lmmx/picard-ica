@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2021"
 authors = ["Louis Maddox <louismmx@gmail.com>"]
 description = "Fast Independent Component Analysis using preconditioned L-BFGS optimization"
-license = "MIT OR Apache-2.0"
+license = "BSD-3-Clause"
 repository = "https://github.com/lmmx/picard-ica"
 documentation = "https://docs.rs/picard-ica"
 readme = "README.md"
@@ -17,12 +17,12 @@ name = "picard"
 [dependencies]
 ndarray = "0.17"
 ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
-num-traits = "0.2"
 rand = "0.9"
 rand_distr = "0.5.1"
 
 [dev-dependencies]
 approx = "0.5"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "benchmarks"

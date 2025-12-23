@@ -282,8 +282,17 @@ pub fn run(
             // Fall back to gradient descent
             memory.clear();
             let neg_g = -&g;
-            let fallback =
-                line_search(&y, &w, density, &neg_g, &signs, current_loss, 10, ortho, extended);
+            let fallback = line_search(
+                &y,
+                &w,
+                density,
+                &neg_g,
+                &signs,
+                current_loss,
+                10,
+                ortho,
+                extended,
+            );
             (fallback.y, fallback.w, fallback.loss, fallback.step)
         } else {
             (result.y, result.w, result.loss, result.step)

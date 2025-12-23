@@ -161,7 +161,10 @@ mod tests {
         let w_inv = a.inv().unwrap();
 
         // Swap rows (permutation)
-        let w = array![[w_inv[[1, 0]], w_inv[[1, 1]]], [w_inv[[0, 0]], w_inv[[0, 1]]]];
+        let w = array![
+            [w_inv[[1, 0]], w_inv[[1, 1]]],
+            [w_inv[[0, 0]], w_inv[[0, 1]]]
+        ];
 
         let dist = amari_distance(&w, &a);
         assert!(dist < 1e-10, "Amari distance should be ~0, got {}", dist);
