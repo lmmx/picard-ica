@@ -332,11 +332,11 @@ pub fn symmetric_orthogonalize(w: &Array2<f64>) -> Array2<f64> {
     let n = w.nrows();
     let mut d_inv_sqrt = Array2::zeros((n, n));
     for i in 0..n {
-        d_inv_sqrt[[i, i]] = 1.0 / eigenvalues[i].sqrt().max(1e-10);
+        d_inv_sqrt[[i, i]] = 1.0 / eigenvalues[i].max(1e-10).sqrt();
     }
 
     let inv_sqrt = eigenvectors.dot(&d_inv_sqrt).dot(&eigenvectors.t());
-    w.dot(&inv_sqrt)
+    inv_sqrt.dot(w)
 }
 
 /// Symmetric eigendecomposition using Jacobi iteration.
