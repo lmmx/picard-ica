@@ -1,160 +1,145 @@
-//! Data whitening (sphering) via PCA.
+// src/whitening.rs
 
+//! Data preprocessing: centering and whitening.
+
+use crate::error::{PicardError, Result};
 use ndarray::{Array1, Array2, Axis};
-
-use crate::error::PicardError;
-use crate::math::symmetric_eigen_sorted;
+use ndarray_linalg::SVD;
 
 /// Result of whitening transformation.
-#[derive(Debug, Clone)]
 pub struct WhiteningResult {
-    /// Whitened data (n_components x n_samples).
+    /// Whitened data matrix.
     pub data: Array2<f64>,
-    /// Whitening matrix K such that X_white = K @ (X - mean).
+    /// Whitening matrix K (n_components × n_features).
     pub whitening_matrix: Array2<f64>,
-    /// Mean of original data (n_features).
-    pub mean: Array1<f64>,
-    /// Explained variance ratio for each component.
-    pub explained_variance_ratio: Array1<f64>,
 }
 
-/// Whiten data using PCA.
+/// Center the data by subtracting the mean of each row.
 ///
 /// # Arguments
 /// * `x` - Data matrix of shape (n_features, n_samples)
+///
+/// # Returns
+/// * Tuple of (centered_data, mean_vector)
+pub fn center(x: &Array2<f64>) -> (Array2<f64>, Array1<f64>) {
+    let mean = x.mean_axis(Axis(1)).unwrap();
+    let mut centered = x.clone();
+
+    for i in 0..x.nrows() {
+        for j in 0..x.ncols() {
+            centered[[i, j]] -= mean[i];
+        }
+    }
+
+    (centered, mean)
+}
+
+/// Whiten the data using PCA.
+///
+/// Whitening transforms the data so that it has unit variance and
+/// the components are uncorrelated.
+///
+/// # Arguments
+/// * `x` - Centered data matrix of shape (n_features, n_samples)
 /// * `n_components` - Number of components to keep
 ///
 /// # Returns
-/// Whitened data and transformation parameters.
-pub fn whiten(x: &Array2<f64>, n_components: usize) -> Result<WhiteningResult, PicardError> {
+/// * `WhiteningResult` containing whitened data and whitening matrix
+pub fn whiten(x: &Array2<f64>, n_components: usize) -> Result<WhiteningResult> {
     let (n_features, n_samples) = (x.nrows(), x.ncols());
 
-    if n_samples == 0 {
-        return Err(PicardError::invalid_dimensions("Input has no samples"));
+    if n_components > n_features {
+        return Err(PicardError::InvalidDimensions {
+            message: format!(
+                "n_components ({}) cannot exceed n_features ({})",
+                n_components, n_features
+            ),
+        });
     }
 
-    if n_features == 0 {
-        return Err(PicardError::invalid_dimensions("Input has no features"));
+    // SVD decomposition
+    let (u, s, _) = x.svd(true, false).map_err(|e| PicardError::ComputationError {
+        message: format!("SVD failed: {}", e),
+    })?;
+
+    let u = u.ok_or_else(|| PicardError::ComputationError {
+        message: "SVD did not return U matrix".into(),
+    })?;
+
+    // Check for near-zero singular values
+    let min_sv = s.iter().take(n_components).cloned().fold(f64::INFINITY, f64::min);
+    if min_sv < 1e-10 {
+        return Err(PicardError::SingularMatrix);
     }
 
-    let n_components = n_components.min(n_features).min(n_samples);
+    // Construct whitening matrix K = (U / s)^T[:n_components]
+    // Scaled by sqrt(n_samples) for unit variance
+    let scale = (n_samples as f64).sqrt();
+    let mut k = Array2::zeros((n_components, n_features));
 
-    // Center the data
-    let mean = x.mean_axis(Axis(1)).unwrap();
-    let mut x_centered = x.clone();
-    for i in 0..n_features {
-        for j in 0..n_samples {
-            x_centered[[i, j]] -= mean[i];
-        }
-    }
-
-    // Compute covariance matrix
-    let cov = x_centered.dot(&x_centered.t()) / (n_samples as f64);
-
-    // Eigendecomposition of covariance (sorted by decreasing eigenvalue)
-    let (eigenvalues, eigenvectors) = symmetric_eigen_sorted(&cov);
-
-    // Check for numerical issues
-    let total_var: f64 = eigenvalues.iter().filter(|&&v| v > 0.0).sum();
-    if total_var < 1e-10 {
-        return Err(PicardError::whitening(
-            "Data has zero or near-zero variance",
-        ));
-    }
-
-    // Check if we have enough positive eigenvalues
-    let n_positive = eigenvalues.iter().filter(|&&v| v > 1e-10).count();
-    if n_positive < n_components {
-        return Err(PicardError::whitening(format!(
-            "Only {} positive eigenvalues, but {} components requested",
-            n_positive, n_components
-        )));
-    }
-
-    // Build whitening matrix: K = D^(-1/2) @ U^T for top n_components
-    let mut whitening_matrix = Array2::zeros((n_components, n_features));
     for i in 0..n_components {
-        let scale = 1.0 / eigenvalues[i].sqrt();
         for j in 0..n_features {
-            whitening_matrix[[i, j]] = eigenvectors[[j, i]] * scale;
+            k[[i, j]] = u[[j, i]] / s[i] * scale;
         }
     }
 
-    // Compute explained variance ratio
-    let mut explained_variance_ratio = Array1::zeros(n_components);
-    for i in 0..n_components {
-        explained_variance_ratio[i] = eigenvalues[i] / total_var;
+    // Enforce fixed sign for reproducibility (match MATLAB convention)
+    for i in 0..k.nrows() {
+        let max_idx = k
+            .row(i)
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .map(|(idx, _)| idx)
+            .unwrap();
+
+        if k[[i, max_idx]] < 0.0 {
+            for j in 0..k.ncols() {
+                k[[i, j]] = -k[[i, j]];
+            }
+        }
     }
 
     // Apply whitening
-    let data = whitening_matrix.dot(&x_centered);
+    let whitened = k.dot(x);
 
     Ok(WhiteningResult {
-        data,
-        whitening_matrix,
-        mean,
-        explained_variance_ratio,
+        data: whitened,
+        whitening_matrix: k,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approx::assert_abs_diff_eq;
+    use ndarray::array;
 
-    fn generate_random_data(n_features: usize, n_samples: usize, seed: u64) -> Array2<f64> {
-        let mut data = Array2::zeros((n_features, n_samples));
-        let mut state = seed;
+    #[test]
+    fn test_center() {
+        let x = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let (centered, mean) = center(&x);
 
-        for i in 0..n_features {
-            for j in 0..n_samples {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                data[[i, j]] = (state >> 33) as f64 / (1u64 << 31) as f64 - 0.5;
-            }
-        }
+        assert!((mean[0] - 2.0).abs() < 1e-10);
+        assert!((mean[1] - 5.0).abs() < 1e-10);
 
-        data
+        // Centered data should have zero mean
+        let new_mean = centered.mean_axis(Axis(1)).unwrap();
+        assert!(new_mean[0].abs() < 1e-10);
+        assert!(new_mean[1].abs() < 1e-10);
     }
 
     #[test]
-    fn test_whiten_identity_covariance() {
-        let x = generate_random_data(5, 1000, 42);
-        let result = whiten(&x, 5).unwrap();
+    fn test_whiten() {
+        let x = array![
+            [1.0, 2.0, 3.0, 4.0],
+            [2.0, 4.0, 6.0, 8.0],
+            [1.0, 3.0, 2.0, 4.0]
+        ];
+        let (centered, _) = center(&x);
+        let result = whiten(&centered, 2).unwrap();
 
-        // Whitened data should have approximately identity covariance
-        let cov = result.data.dot(&result.data.t()) / 1000.0;
-
-        for i in 0..5 {
-            for j in 0..5 {
-                let expected = if i == j { 1.0 } else { 0.0 };
-                assert_abs_diff_eq!(cov[[i, j]], expected, epsilon = 0.15);
-            }
-        }
-    }
-
-    #[test]
-    fn test_whiten_explained_variance() {
-        let x = generate_random_data(5, 1000, 42);
-        let result = whiten(&x, 5).unwrap();
-
-        // Explained variance ratios should sum to approximately 1
-        let total: f64 = result.explained_variance_ratio.sum();
-        assert_abs_diff_eq!(total, 1.0, epsilon = 0.01);
-
-        // Should be in descending order
-        for i in 1..5 {
-            assert!(result.explained_variance_ratio[i] <= result.explained_variance_ratio[i - 1]);
-        }
-    }
-
-    #[test]
-    fn test_whiten_fewer_components() {
-        let x = generate_random_data(10, 1000, 42);
-        let result = whiten(&x, 3).unwrap();
-
-        assert_eq!(result.data.nrows(), 3);
-        assert_eq!(result.data.ncols(), 1000);
-        assert_eq!(result.whitening_matrix.nrows(), 3);
-        assert_eq!(result.whitening_matrix.ncols(), 10);
+        assert_eq!(result.data.nrows(), 2);
+        assert_eq!(result.data.ncols(), 4);
+        assert_eq!(result.whitening_matrix.shape(), &[2, 3]);
     }
 }

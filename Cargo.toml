@@ -3,7 +3,7 @@ name = "picard-ica"
 version = "0.1.1"
 edition = "2021"
 authors = ["Louis Maddox <louismmx@gmail.com>"]
-description = "Preconditioned ICA for Real Data - Fast Independent Component Analysis"
+description = "Fast Independent Component Analysis using preconditioned L-BFGS optimization"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lmmx/picard-ica"
 documentation = "https://docs.rs/picard-ica"
@@ -16,14 +16,20 @@ name = "picard"
 
 [dependencies]
 ndarray = "0.17"
+ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
 num-traits = "0.2"
+rand = "0.9"
+rand_distr = "0.5.1"
 
 [dev-dependencies]
-ndarray-rand = "0.16"
-rand = "0.9"
 approx = "0.5"
-criterion = "0.8"
 
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[features]
+default = []
+# Alternative BLAS backends
+intel-mkl = ["ndarray-linalg/intel-mkl-system"]
+netlib = ["ndarray-linalg/netlib-system"]

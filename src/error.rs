@@ -1,67 +1,73 @@
-//! Error types for Picard ICA.
+// src/error.rs
 
-use core::fmt;
+//! Error types for the Picard crate.
 
-/// Errors that can occur during Picard ICA fitting.
+use std::fmt;
+
+/// Errors that can occur during PICARD computation.
 #[derive(Debug, Clone)]
 pub enum PicardError {
-    /// Not enough samples for the requested number of components.
-    InsufficientSamples {
-        n_samples: usize,
-        n_components: usize,
-    },
-
-    /// Not enough features for the requested number of components.
-    InsufficientFeatures {
-        n_features: usize,
-        n_components: usize,
-    },
-
-    /// Input matrix has invalid dimensions.
-    InvalidDimensions { message: String },
-
-    /// Numerical error during computation.
-    NumericalError { message: String },
-
     /// Algorithm did not converge within the maximum number of iterations.
-    ConvergenceError { n_iter: usize, gradient_norm: f64 },
+    NotConverged {
+        /// Final gradient norm achieved.
+        gradient_norm: f64,
+        /// Requested tolerance.
+        tolerance: f64,
+        /// Number of iterations performed.
+        iterations: usize,
+    },
 
-    /// Error during whitening/PCA step.
-    WhiteningError { message: String },
+    /// Input dimensions are invalid.
+    InvalidDimensions {
+        /// Description of the dimension error.
+        message: String,
+    },
+
+    /// A singular matrix was encountered during computation.
+    SingularMatrix,
+
+    /// General computation error.
+    ComputationError {
+        /// Description of what went wrong.
+        message: String,
+    },
+
+    /// Invalid configuration parameter.
+    InvalidConfig {
+        /// Name of the invalid parameter.
+        parameter: String,
+        /// Description of why it's invalid.
+        message: String,
+    },
 }
 
 impl fmt::Display for PicardError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InsufficientSamples { n_samples, n_components } => {
+            PicardError::NotConverged {
+                gradient_norm,
+                tolerance,
+                iterations,
+            } => {
                 write!(
                     f,
-                    "insufficient samples: need more than {} samples, got {}",
-                    n_components, n_samples
+                    "PICARD did not converge after {} iterations. \
+                     Final gradient norm: {:.4e}, requested tolerance: {:.4e}. \
+                     Consider increasing max_iter or tolerance.",
+                    iterations, gradient_norm, tolerance
                 )
             }
-            Self::InsufficientFeatures { n_features, n_components } => {
-                write!(
-                    f,
-                    "insufficient features: need at least {} features, got {}",
-                    n_components, n_features
-                )
+            PicardError::InvalidDimensions { message } => {
+                write!(f, "Invalid dimensions: {}", message)
             }
-            Self::InvalidDimensions { message } => {
-                write!(f, "invalid input dimensions: {}", message)
+            PicardError::SingularMatrix => {
+                write!(f, "Singular matrix encountered during computation")
             }
-            Self::NumericalError { message } => {
-                write!(f, "numerical error: {}", message)
+            PicardError::ComputationError { message } => {
+                write!(f, "Computation error: {}", message)
             }
-            Self::ConvergenceError { n_iter, gradient_norm } => {
-                write!(
-                    f,
-                    "failed to converge after {} iterations (gradient norm: {:.2e})",
-                    n_iter, gradient_norm
-                )
-            }
-            Self::WhiteningError { message } => {
-                write!(f, "whitening failed: {}", message)
+            PicardError::InvalidConfig { parameter, message } => {
+                write!(f, "Invalid configuration for '{}': {}", parameter, message)
             }
         }
     }
@@ -69,30 +75,5 @@ impl fmt::Display for PicardError {
 
 impl std::error::Error for PicardError {}
 
-impl PicardError {
-    pub(crate) fn insufficient_samples(n_samples: usize, n_components: usize) -> Self {
-        Self::InsufficientSamples {
-            n_samples,
-            n_components,
-        }
-    }
-
-    pub(crate) fn insufficient_features(n_features: usize, n_components: usize) -> Self {
-        Self::InsufficientFeatures {
-            n_features,
-            n_components,
-        }
-    }
-
-    pub(crate) fn invalid_dimensions(message: impl Into<String>) -> Self {
-        Self::InvalidDimensions {
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn whitening(message: impl Into<String>) -> Self {
-        Self::WhiteningError {
-            message: message.into(),
-        }
-    }
-}
+/// Convenience type alias for Results with PicardError.
+pub type Result<T> = std::result::Result<T, PicardError>;

@@ -1,129 +1,181 @@
 // src/config.rs
 
-//! Configuration for Picard ICA algorithm.
+//! Configuration for the PICARD algorithm.
 
-/// Configuration parameters for Picard ICA.
-#[derive(Debug, Clone)]
+use crate::density::DensityType;
+use crate::error::{PicardError, Result};
+use ndarray::Array2;
+
+/// Configuration parameters for the PICARD algorithm.
+#[derive(Clone)]
 pub struct PicardConfig {
-    /// Number of independent components to extract.
-    pub n_components: usize,
+    /// Density function to use for ICA.
+    pub density: DensityType,
+
+    /// Number of components to extract. If None, uses min(n_features, n_samples).
+    pub n_components: Option<usize>,
+
+    /// If true, uses Picard-O with orthogonal constraint.
+    pub ortho: bool,
+
+    /// If true, uses extended algorithm for sub/super-Gaussian sources.
+    /// Defaults to same value as `ortho` if not specified.
+    pub extended: Option<bool>,
+
+    /// If true, perform whitening on the data.
+    pub whiten: bool,
+
+    /// If true, center the data before processing.
+    pub centering: bool,
 
     /// Maximum number of iterations.
     pub max_iter: usize,
 
-    /// Convergence tolerance (infinity norm of gradient).
+    /// Convergence tolerance for gradient norm.
     pub tol: f64,
 
-    /// L-BFGS memory size (number of past iterations to store).
-    pub memory_size: usize,
+    /// Size of L-BFGS memory.
+    pub m: usize,
+
+    /// Maximum line search attempts.
+    pub ls_tries: usize,
 
     /// Minimum eigenvalue for Hessian regularization.
     pub lambda_min: f64,
 
-    /// Maximum line search iterations per step.
-    pub max_line_search: usize,
+    /// Initial unmixing matrix. If None, uses random initialization.
+    pub w_init: Option<Array2<f64>>,
 
-    /// Use extended mode for sub-Gaussian sources.
-    ///
-    /// When true, the algorithm adapts the score function based on
-    /// the estimated kurtosis of each component.
-    pub extended: bool,
+    /// Number of FastICA iterations before PICARD. If None, skip FastICA.
+    pub fastica_it: Option<usize>,
 
-    /// Random seed for reproducible initialization.
-    pub random_seed: Option<u64>,
+    /// Random seed for reproducibility.
+    pub random_state: Option<u64>,
 
-    /// Print progress information to stderr.
+    /// If true, print progress information.
     pub verbose: bool,
-
-    /// Whether to whiten the data before ICA.
-    ///
-    /// If false, assumes input is already whitened.
-    pub whiten: bool,
-
-    /// Orthogonal constraint (Picard-O variant).
-    ///
-    /// When true, maintains orthogonality of the unmixing matrix.
-    pub ortho: bool,
 }
 
 impl Default for PicardConfig {
     fn default() -> Self {
         Self {
-            n_components: 10,
-            max_iter: 200,
-            tol: 1e-7,
-            memory_size: 7,
-            lambda_min: 1e-2,
-            max_line_search: 10,
-            extended: true,
-            random_seed: None,
-            verbose: false,
-            whiten: true,
+            density: DensityType::default(),
+            n_components: None,
             ortho: true,
+            extended: None,
+            whiten: true,
+            centering: true,
+            max_iter: 500,
+            tol: 1e-7,
+            m: 7,
+            ls_tries: 10,
+            lambda_min: 0.01,
+            w_init: None,
+            fastica_it: None,
+            random_state: None,
+            verbose: false,
         }
     }
 }
 
 impl PicardConfig {
-    /// Create a new configuration with the specified number of components.
-    pub fn new(n_components: usize) -> Self {
-        Self {
-            n_components,
-            ..Default::default()
-        }
+    /// Create a new configuration with default values.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Validate configuration parameters.
-    pub(crate) fn validate(&self) -> Result<(), crate::PicardError> {
-        if self.n_components == 0 {
-            return Err(crate::PicardError::invalid_dimensions(
-                "n_components must be at least 1",
-            ));
-        }
+    /// Create a builder for constructing a configuration.
+    pub fn builder() -> ConfigBuilder {
+        ConfigBuilder::new()
+    }
+
+    /// Get the effective value of `extended` (defaults to `ortho` if not set).
+    pub fn effective_extended(&self) -> bool {
+        self.extended.unwrap_or(self.ortho)
+    }
+
+    /// Validate the configuration.
+    pub fn validate(&self) -> Result<()> {
         if self.max_iter == 0 {
-            return Err(crate::PicardError::invalid_dimensions(
-                "max_iter must be at least 1",
-            ));
+            return Err(PicardError::InvalidConfig {
+                parameter: "max_iter".into(),
+                message: "must be greater than 0".into(),
+            });
         }
+
         if self.tol <= 0.0 {
-            return Err(crate::PicardError::invalid_dimensions(
-                "tol must be positive",
-            ));
+            return Err(PicardError::InvalidConfig {
+                parameter: "tol".into(),
+                message: "must be positive".into(),
+            });
         }
-        if self.memory_size == 0 {
-            return Err(crate::PicardError::invalid_dimensions(
-                "memory_size must be at least 1",
-            ));
+
+        if self.lambda_min <= 0.0 {
+            return Err(PicardError::InvalidConfig {
+                parameter: "lambda_min".into(),
+                message: "must be positive".into(),
+            });
         }
+
+        if self.m == 0 {
+            return Err(PicardError::InvalidConfig {
+                parameter: "m".into(),
+                message: "L-BFGS memory size must be at least 1".into(),
+            });
+        }
+
         Ok(())
     }
 }
 
-/// Builder for [`PicardConfig`].
-///
-/// # Example
-///
-/// ```rust
-/// use picard::PicardBuilder;
-///
-/// let config = PicardBuilder::new(10)
-///     .max_iter(100)
-///     .tol(1e-6)
-///     .extended(true)
-///     .random_seed(42)
-///     .build();
-/// ```
-#[derive(Debug, Clone)]
-pub struct PicardBuilder {
+/// Builder for constructing `PicardConfig` with a fluent API.
+#[derive(Default)]
+pub struct ConfigBuilder {
     config: PicardConfig,
 }
 
-impl PicardBuilder {
-    /// Create a new builder with the specified number of components.
-    pub fn new(n_components: usize) -> Self {
+impl ConfigBuilder {
+    /// Create a new builder with default values.
+    pub fn new() -> Self {
         Self {
-            config: PicardConfig::new(n_components),
+            config: PicardConfig::default(),
         }
+    }
+
+    /// Set the density function.
+    pub fn density(mut self, density: DensityType) -> Self {
+        self.config.density = density;
+        self
+    }
+
+    /// Set the number of components to extract.
+    pub fn n_components(mut self, n: usize) -> Self {
+        self.config.n_components = Some(n);
+        self
+    }
+
+    /// Enable or disable orthogonal constraint (Picard-O).
+    pub fn ortho(mut self, ortho: bool) -> Self {
+        self.config.ortho = ortho;
+        self
+    }
+
+    /// Enable or disable extended algorithm for mixed sub/super-Gaussian sources.
+    pub fn extended(mut self, extended: bool) -> Self {
+        self.config.extended = Some(extended);
+        self
+    }
+
+    /// Enable or disable whitening.
+    pub fn whiten(mut self, whiten: bool) -> Self {
+        self.config.whiten = whiten;
+        self
+    }
+
+    /// Enable or disable centering.
+    pub fn centering(mut self, centering: bool) -> Self {
+        self.config.centering = centering;
+        self
     }
 
     /// Set the maximum number of iterations.
@@ -139,8 +191,14 @@ impl PicardBuilder {
     }
 
     /// Set the L-BFGS memory size.
-    pub fn memory_size(mut self, memory_size: usize) -> Self {
-        self.config.memory_size = memory_size;
+    pub fn m(mut self, m: usize) -> Self {
+        self.config.m = m;
+        self
+    }
+
+    /// Set the maximum line search attempts.
+    pub fn ls_tries(mut self, ls_tries: usize) -> Self {
+        self.config.ls_tries = ls_tries;
         self
     }
 
@@ -150,21 +208,21 @@ impl PicardBuilder {
         self
     }
 
-    /// Set the maximum line search iterations.
-    pub fn max_line_search(mut self, max_line_search: usize) -> Self {
-        self.config.max_line_search = max_line_search;
+    /// Set the initial unmixing matrix.
+    pub fn w_init(mut self, w_init: Array2<f64>) -> Self {
+        self.config.w_init = Some(w_init);
         self
     }
 
-    /// Enable or disable extended mode for sub-Gaussian sources.
-    pub fn extended(mut self, extended: bool) -> Self {
-        self.config.extended = extended;
+    /// Set the number of FastICA pre-iterations.
+    pub fn fastica_it(mut self, iterations: usize) -> Self {
+        self.config.fastica_it = Some(iterations);
         self
     }
 
-    /// Set a random seed for reproducible results.
-    pub fn random_seed(mut self, seed: u64) -> Self {
-        self.config.random_seed = Some(seed);
+    /// Set the random seed.
+    pub fn random_state(mut self, seed: u64) -> Self {
+        self.config.random_state = Some(seed);
         self
     }
 
@@ -174,28 +232,14 @@ impl PicardBuilder {
         self
     }
 
-    /// Enable or disable whitening.
-    pub fn whiten(mut self, whiten: bool) -> Self {
-        self.config.whiten = whiten;
-        self
-    }
-
-    /// Enable or disable orthogonal constraint.
-    pub fn ortho(mut self, ortho: bool) -> Self {
-        self.config.ortho = ortho;
-        self
-    }
-
     /// Build the configuration.
     pub fn build(self) -> PicardConfig {
         self.config
     }
 
-    /// Build the configuration and fit to data.
-    ///
-    /// This is a convenience method equivalent to calling `build()` followed by
-    /// `Picard::fit_with_config()`.
-    pub fn fit(self, x: &ndarray::Array2<f64>) -> Result<crate::PicardResult, crate::PicardError> {
-        crate::Picard::fit_with_config(x, self.config)
+    /// Build and validate the configuration.
+    pub fn build_validated(self) -> Result<PicardConfig> {
+        self.config.validate()?;
+        Ok(self.config)
     }
 }

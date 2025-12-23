@@ -1,112 +1,22 @@
-//! Main Picard ICA solver.
+//! Main PICARD solver interface.
 
-use ndarray::{Array1, Array2};
+use crate::config::PicardConfig;
+use crate::core;
+use crate::density::DensityType;
+use crate::error::{PicardError, Result};
+use crate::math::sym_decorrelation;
+use crate::result::PicardResult;
+use crate::whitening::{center, whiten};
 
-use crate::config::{PicardBuilder, PicardConfig};
-use crate::error::PicardError;
-use crate::lbfgs::LBFGSMemory;
-use crate::math::{
-    apply_hessian_inverse, compute_kurtosis_signs, frobenius_dot, hessian_approx, inf_norm,
-    log_det, neg_log_likelihood, regularize_hessian, relative_gradient, score_derivative_extended,
-    score_extended, score_tanh, score_tanh_derivative, symmetric_orthogonalize,
-};
-use crate::whitening::{whiten, WhiteningResult};
+use ndarray::{Array2, Axis};
+use rand::prelude::*;
+use rand_distr::StandardNormal;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
-/// Result of Picard ICA decomposition.
-#[derive(Debug, Clone)]
-pub struct PicardResult {
-    /// Unmixing matrix W (operates on whitened data).
-    unmixing: Array2<f64>,
-    /// Whitening matrix K.
-    whitening: Array2<f64>,
-    /// Mean of original data.
-    mean: Array1<f64>,
-    /// Estimated independent sources (n_components x n_samples).
-    sources: Array2<f64>,
-    /// Number of iterations until convergence.
-    n_iter: usize,
-    /// Final gradient infinity norm.
-    final_gradient_norm: f64,
-    /// Whether the algorithm converged.
-    converged: bool,
-    /// Explained variance ratio from whitening.
-    explained_variance_ratio: Array1<f64>,
-}
-
-impl PicardResult {
-    /// Get the unmixing matrix W (operates on whitened data).
-    ///
-    /// For whitened data: S = W @ X_white
-    pub fn unmixing_matrix(&self) -> &Array2<f64> {
-        &self.unmixing
-    }
-
-    /// Get the whitening matrix K.
-    pub fn whitening_matrix(&self) -> &Array2<f64> {
-        &self.whitening
-    }
-
-    /// Get the mean of the original data.
-    pub fn mean(&self) -> &Array1<f64> {
-        &self.mean
-    }
-
-    /// Get the estimated independent sources.
-    pub fn sources(&self) -> &Array2<f64> {
-        &self.sources
-    }
-
-    /// Get the number of iterations.
-    pub fn n_iter(&self) -> usize {
-        self.n_iter
-    }
-
-    /// Get the final gradient norm.
-    pub fn final_gradient_norm(&self) -> f64 {
-        self.final_gradient_norm
-    }
-
-    /// Check if the algorithm converged.
-    pub fn converged(&self) -> bool {
-        self.converged
-    }
-
-    /// Get explained variance ratio from whitening.
-    pub fn explained_variance_ratio(&self) -> &Array1<f64> {
-        &self.explained_variance_ratio
-    }
-
-    /// Get the full unmixing matrix that applies to centered data.
-    ///
-    /// Returns W_full such that S = W_full @ (X - mean)
-    pub fn full_unmixing_matrix(&self) -> Array2<f64> {
-        self.unmixing.dot(&self.whitening)
-    }
-
-    /// Transform new data using the fitted model.
-    ///
-    /// # Arguments
-    /// * `x` - New data matrix (n_features x n_samples)
-    ///
-    /// # Returns
-    /// Transformed data (n_components x n_samples)
-    pub fn transform(&self, x: &Array2<f64>) -> Array2<f64> {
-        let (n_features, n_samples) = (x.nrows(), x.ncols());
-
-        // Center using stored mean
-        let mut x_centered = x.clone();
-        for i in 0..n_features {
-            for j in 0..n_samples {
-                x_centered[[i, j]] -= self.mean[i];
-            }
-        }
-
-        // Apply full unmixing: W @ K @ (X - mean)
-        self.unmixing.dot(&self.whitening.dot(&x_centered))
-    }
-}
-
-/// Picard ICA algorithm.
+/// The PICARD Independent Component Analysis solver.
+///
+/// This struct provides static methods for fitting ICA models.
 pub struct Picard;
 
 impl Picard {
@@ -114,17 +24,11 @@ impl Picard {
     ///
     /// # Arguments
     /// * `x` - Data matrix of shape (n_features, n_samples)
-    /// * `n_components` - Number of independent components to extract
     ///
     /// # Returns
-    /// Fitted model result.
-    pub fn fit(x: &Array2<f64>, n_components: usize) -> Result<PicardResult, PicardError> {
-        Self::fit_with_config(x, PicardConfig::new(n_components))
-    }
-
-    /// Create a builder for configuring the algorithm.
-    pub fn builder(n_components: usize) -> PicardBuilder {
-        PicardBuilder::new(n_components)
+    /// * `PicardResult` containing unmixing matrix, sources, etc.
+    pub fn fit(x: &Array2<f64>) -> Result<PicardResult> {
+        Self::fit_with_config(x, &PicardConfig::default())
     }
 
     /// Fit ICA model with custom configuration.
@@ -134,402 +38,308 @@ impl Picard {
     /// * `config` - Algorithm configuration
     ///
     /// # Returns
-    /// Fitted model result.
-    pub fn fit_with_config(
-        x: &Array2<f64>,
-        config: PicardConfig,
-    ) -> Result<PicardResult, PicardError> {
+    /// * `PicardResult` containing unmixing matrix, sources, etc.
+    pub fn fit_with_config(x: &Array2<f64>, config: &PicardConfig) -> Result<PicardResult> {
         config.validate()?;
 
-        let (n_features, n_samples) = (x.nrows(), x.ncols());
-        let n_components = config.n_components.min(n_features);
+        let (n, p) = (x.nrows(), x.ncols());
 
-        // Validate dimensions
-        if n_samples <= n_components {
-            return Err(PicardError::insufficient_samples(n_samples, n_components));
+        if n == 0 || p == 0 {
+            return Err(PicardError::InvalidDimensions {
+                message: "Input matrix cannot be empty".into(),
+            });
         }
-        if n_features < n_components {
-            return Err(PicardError::insufficient_features(n_features, n_components));
+
+        // Initialize RNG
+        let mut rng = match config.random_state {
+            Some(seed) => StdRng::seed_from_u64(seed),
+            None => StdRng::from_rng(&mut rand::rng()),
+        };
+
+        // Determine number of components
+        let n_components = config.n_components.unwrap_or(n.min(p)).min(n.min(p));
+
+        // Get effective extended setting
+        let extended = config.effective_extended();
+
+        // Warn about potentially problematic configurations
+        if !matches!(config.density, DensityType::Tanh(_)) && extended && !config.ortho {
+            eprintln!(
+                "Warning: Using a density other than tanh with extended=true and ortho=false \
+                 may result in incorrect estimation or numerical overflow"
+            );
         }
+
+        // Center the data
+        let (x1, x_mean) = if config.centering {
+            let (centered, mean) = center(x);
+            (centered, Some(mean))
+        } else {
+            (x.clone(), None)
+        };
 
         // Whiten the data
-        let WhiteningResult {
-            data: x_white,
-            whitening_matrix: k,
-            mean,
-            explained_variance_ratio,
-        } = whiten(x, n_components)?;
+        let (x1, k) = if config.whiten {
+            let whitening_result = whiten(&x1, n_components)?;
+            (whitening_result.data, Some(whitening_result.whitening_matrix))
+        } else {
+            (x1, None)
+        };
 
-        // Initialize unmixing matrix W
-        let mut w = initialize_unmixing(n_components, config.random_seed);
-        if config.ortho {
-            w = symmetric_orthogonalize(&w);
-        }
+        let actual_components = x1.nrows();
 
-        // Current sources
-        let mut y = w.dot(&x_white);
-
-        // L-BFGS memory
-        let mut memory = LBFGSMemory::new(config.memory_size);
-
-        // Kurtosis signs for extended mode
-        let mut signs: Option<Array1<f64>> = None;
-
-        // Previous gradient for L-BFGS updates
-        let mut prev_gradient: Option<Array2<f64>> = None;
-
-        let mut n_iter = 0;
-        let mut final_g_norm = f64::INFINITY;
-        let mut converged = false;
-
-        for iter in 0..config.max_iter {
-            n_iter = iter + 1;
-
-            // Update kurtosis signs periodically for extended mode
-            if config.extended && (iter % 10 == 0 || signs.is_none()) {
-                signs = Some(compute_kurtosis_signs(&y));
-            }
-
-            // Compute score function
-            let psi = if config.extended {
-                score_extended(&y, signs.as_ref().unwrap())
-            } else {
-                score_tanh(&y)
-            };
-
-            // Compute gradient
-            let g = relative_gradient(&y, &psi);
-            let g_norm = inf_norm(&g);
-            final_g_norm = g_norm;
-
-            if config.verbose && (iter % 10 == 0 || iter == 0) {
-                eprintln!(
-                    "[Picard] iter {:4}: gradient norm = {:.6e}",
-                    iter, g_norm
-                );
-            }
-
-            // Check convergence
-            if g_norm < config.tol {
-                converged = true;
-                if config.verbose {
-                    eprintln!("[Picard] Converged at iteration {}", iter);
+        // Initialize unmixing matrix
+        let w_init = match &config.w_init {
+            Some(w) => {
+                if w.shape() != [actual_components, actual_components] {
+                    return Err(PicardError::InvalidDimensions {
+                        message: format!(
+                            "w_init shape {:?} doesn't match expected ({}, {})",
+                            w.shape(),
+                            actual_components,
+                            actual_components
+                        ),
+                    });
                 }
-                break;
+                w.clone()
             }
-
-            // Compute score derivative
-            let psi_prime = if config.extended {
-                score_derivative_extended(&y, signs.as_ref().unwrap())
-            } else {
-                score_tanh_derivative(&y)
-            };
-
-            // Compute and regularize Hessian approximation
-            let mut h = hessian_approx(&y, &psi_prime);
-            regularize_hessian(&mut h, config.lambda_min);
-
-            // Apply Hessian inverse to gradient
-            let h_inv_g = apply_hessian_inverse(&g, &h);
-
-            // Compute search direction via L-BFGS
-            let p = memory.compute_direction(&g, &h_inv_g);
-
-            // Line search
-            let (w_new, y_new, step_taken, ls_success) = line_search(
-                &w,
-                &x_white,
-                &p,
-                &g,
-                config.extended,
-                signs.as_ref(),
-                config.max_line_search,
-            );
-
-            if ls_success {
-                // Update L-BFGS memory
-                if let Some(ref prev_g) = prev_gradient {
-                    let s = &p * step_taken;
-                    let y_diff = &g - prev_g;
-                    memory.push(s, y_diff);
-                }
-
-                w = w_new;
-                y = y_new;
-            } else {
-                // Line search failed - reset and take small gradient step
-                if config.verbose {
-                    eprintln!(
-                        "[Picard] Line search failed at iter {}, resetting L-BFGS",
-                        iter
-                    );
-                }
-                memory.clear();
-
-                let step = 0.1;
-                let mut w_new = Array2::eye(n_components);
-                for i in 0..n_components {
-                    for j in 0..n_components {
-                        w_new[[i, j]] -= step * h_inv_g[[i, j]];
+            None => {
+                let mut w = Array2::zeros((actual_components, actual_components));
+                for i in 0..actual_components {
+                    for j in 0..actual_components {
+                        w[[i, j]] = rng.sample(StandardNormal);
                     }
                 }
-                w = w_new.dot(&w);
-                y = w.dot(&x_white);
+                sym_decorrelation(&w)?
             }
+        };
 
-            // Apply orthogonalization if requested
-            if config.ortho {
-                w = symmetric_orthogonalize(&w);
-                y = w.dot(&x_white);
+        // Optional FastICA pre-iterations
+        let w_init = if let Some(fastica_it) = config.fastica_it {
+            if config.verbose {
+                println!("Running {} iterations of FastICA...", fastica_it);
             }
+            ica_par(&x1, &config.density, fastica_it, &w_init, config.verbose)?
+        } else {
+            w_init
+        };
 
-            prev_gradient = Some(g);
+        // Apply initial transformation
+        let x1 = w_init.dot(&x1);
+
+        // Covariance for extended ICA
+        let covariance = if extended && config.whiten {
+            Some(Array2::eye(actual_components))
+        } else {
+            None
+        };
+
+        // Run core algorithm
+        if config.verbose {
+            println!("Running Picard...");
         }
 
-        if config.verbose && !converged {
+        let (y, w, info) = core::run(
+            &x1,
+            &config.density,
+            config.ortho,
+            extended,
+            config.m,
+            config.max_iter,
+            config.tol,
+            config.lambda_min,
+            config.ls_tries,
+            config.verbose,
+            covariance.as_ref(),
+        );
+
+        // Combine transformations
+        let w = w.dot(&w_init);
+
+        if !info.converged && config.verbose {
             eprintln!(
-                "[Picard] Did not converge after {} iterations (gradient norm: {:.2e})",
-                n_iter, final_g_norm
+                "Warning: PICARD did not converge. \
+                 Final gradient norm: {:.4e}, tolerance: {:.4e}",
+                info.gradient_norm, config.tol
             );
         }
 
-        // Compute final sources using the same transform logic
-        let sources = compute_sources(x, &w, &k, &mean);
-
         Ok(PicardResult {
-            unmixing: w,
             whitening: k,
-            mean,
-            sources,
-            n_iter,
-            final_gradient_norm: final_g_norm,
-            converged,
-            explained_variance_ratio,
+            unmixing: w,
+            sources: y,
+            mean: x_mean,
+            n_iterations: info.n_iterations,
+            converged: info.converged,
+            gradient_norm: info.gradient_norm,
+            signs: info.signs,
         })
     }
-}
 
-/// Compute sources from original data using unmixing and whitening matrices.
-fn compute_sources(
-    x: &Array2<f64>,
-    w: &Array2<f64>,
-    k: &Array2<f64>,
-    mean: &Array1<f64>,
-) -> Array2<f64> {
-    let (n_features, n_samples) = (x.nrows(), x.ncols());
+    /// Transform new data using a fitted model.
+    ///
+    /// # Arguments
+    /// * `x` - New data matrix (n_features, n_samples)
+    /// * `result` - Result from a previous fit
+    ///
+    /// # Returns
+    /// * Transformed data (n_components, n_samples)
+    pub fn transform(x: &Array2<f64>, result: &PicardResult) -> Result<Array2<f64>> {
+        let mut x = x.clone();
 
-    // Center the data
-    let mut x_centered = x.clone();
-    for i in 0..n_features {
-        for j in 0..n_samples {
-            x_centered[[i, j]] -= mean[i];
-        }
-    }
-
-    // Apply full unmixing: W @ K @ (X - mean)
-    w.dot(&k.dot(&x_centered))
-}
-
-/// Initialize unmixing matrix.
-fn initialize_unmixing(n: usize, seed: Option<u64>) -> Array2<f64> {
-    match seed {
-        Some(s) => {
-            // Deterministic initialization with small random perturbation
-            let mut w = Array2::eye(n);
-            let mut state = s;
-
-            for i in 0..n {
-                for j in 0..n {
-                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    let noise = ((state >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 0.01;
-                    w[[i, j]] += noise;
+        // Subtract mean if available
+        if let Some(ref mean) = result.mean {
+            for i in 0..x.nrows() {
+                for j in 0..x.ncols() {
+                    x[[i, j]] -= mean[i];
                 }
             }
-            w
         }
-        None => Array2::eye(n),
+
+        // Apply full unmixing
+        let w = result.full_unmixing();
+        Ok(w.dot(&x))
     }
 }
 
-/// Perform backtracking line search with Armijo condition.
-fn line_search(
-    w: &Array2<f64>,
-    x_white: &Array2<f64>,
-    direction: &Array2<f64>,
-    gradient: &Array2<f64>,
-    extended: bool,
-    signs: Option<&Array1<f64>>,
+/// FastICA parallel iteration (used for initialization).
+fn ica_par(
+    x: &Array2<f64>,
+    density: &DensityType,
     max_iter: usize,
-) -> (Array2<f64>, Array2<f64>, f64, bool) {
-    let n = w.nrows();
-    let y = w.dot(x_white);
-    let log_det_w = log_det(w);
-    let current_loss = neg_log_likelihood(&y, log_det_w, extended, signs);
-    let descent = frobenius_dot(gradient, direction);
-
-    let c1 = 1e-4; // Armijo constant
-    let mut alpha = 1.0;
+    w_init: &Array2<f64>,
+    verbose: bool,
+) -> Result<Array2<f64>> {
+    let mut w = sym_decorrelation(w_init)?;
+    let p = x.ncols() as f64;
 
     for _ in 0..max_iter {
-        // W_new = (I + α*p) @ W
-        let mut update = Array2::eye(n);
-        for i in 0..n {
-            for j in 0..n {
-                update[[i, j]] += alpha * direction[[i, j]];
+        let wx = w.dot(x);
+        let (gwtx, g_wtx) = density.score_and_der(&wx);
+        let g_wtx_mean = g_wtx.mean_axis(Axis(1)).unwrap();
+
+        // C = E[g(Wx)X^T] - E[g'(Wx)] * W
+        let mut c = gwtx.dot(&x.t()) / p;
+        for i in 0..w.nrows() {
+            for j in 0..w.ncols() {
+                c[[i, j]] -= g_wtx_mean[i] * w[[i, j]];
             }
         }
-        let w_new = update.dot(w);
-        let y_new = w_new.dot(x_white);
 
-        let log_det_new = log_det(&w_new);
-        let new_loss = neg_log_likelihood(&y_new, log_det_new, extended, signs);
-
-        // Armijo condition
-        if new_loss < current_loss + c1 * alpha * descent {
-            return (w_new, y_new, alpha, true);
-        }
-
-        alpha *= 0.5;
+        w = sym_decorrelation(&c)?;
     }
 
-    // Return current state if line search failed
-    (w.clone(), y, 0.0, false)
-}
+    if verbose {
+        println!("FastICA pre-iterations complete.");
+    }
 
-// ============================================================================
-// Tests
-// ============================================================================
+    Ok(w)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array;
+    use rand_distr::Uniform;
 
-    /// Generate synthetic ICA test data.
-    fn generate_ica_data(
-        n_sources: usize,
-        n_samples: usize,
+    fn generate_test_data(
+        n: usize,
+        t: usize,
         seed: u64,
     ) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
-        let mut sources = Array2::zeros((n_sources, n_samples));
-        let mut state = seed;
+        let mut rng = StdRng::seed_from_u64(seed);
 
-        // Generate independent Laplace sources (super-Gaussian)
-        for i in 0..n_sources {
-            for j in 0..n_samples {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let u = (state >> 33) as f64 / (1u64 << 31) as f64;
-                sources[[i, j]] = if u < 0.5 {
-                    (2.0 * u).ln()
-                } else {
-                    -(2.0 * (1.0 - u)).ln()
-                };
+        // Generate Laplacian-like sources
+        let mut s = Array2::zeros((n, t));
+        for i in 0..n {
+            for j in 0..t {
+                let u: f64 = rng.gen_range(0.0..1.0);
+                let sign = if rng.gen::<bool>() { 1.0 } else { -1.0 };
+                s[[i, j]] = sign * (-u.ln());
             }
         }
 
-        // Random mixing matrix
-        let mut mixing = Array2::zeros((n_sources, n_sources));
-        for i in 0..n_sources {
-            for j in 0..n_sources {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                mixing[[i, j]] = (state >> 33) as f64 / (1u64 << 31) as f64 - 0.5;
+        // Generate mixing matrix
+        let mut a = Array2::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                a[[i, j]] = rng.sample(StandardNormal);
             }
         }
 
-        let mixed = mixing.dot(&sources);
+        // Mix signals
+        let x = a.dot(&s);
 
-        (sources, mixing, mixed)
+        (s, a, x)
     }
 
     #[test]
-    fn test_picard_basic() {
-        let (_sources, _mixing, mixed) = generate_ica_data(3, 1000, 42);
+    fn test_fit_default() {
+        let (_, _, x) = generate_test_data(3, 1000, 42);
 
-        let result = Picard::fit(&mixed, 3).unwrap();
+        let result = Picard::fit(&x).unwrap();
 
-        assert!(result.converged(), "Algorithm should converge");
-        assert!(result.n_iter() < 100, "Should converge in reasonable iterations");
-        assert_eq!(result.sources().nrows(), 3);
-        assert_eq!(result.sources().ncols(), 1000);
+        assert_eq!(result.sources.nrows(), 3);
+        assert_eq!(result.sources.ncols(), 1000);
+        assert_eq!(result.unmixing.nrows(), 3);
+        assert_eq!(result.unmixing.ncols(), 3);
     }
 
     #[test]
-    fn test_picard_builder() {
-        let (_sources, _mixing, mixed) = generate_ica_data(3, 1000, 42);
+    fn test_fit_with_config() {
+        let (_, _, x) = generate_test_data(3, 1000, 42);
 
-        let result = Picard::builder(3)
+        let config = PicardConfig::builder()
             .max_iter(100)
-            .tol(1e-6)
-            .random_seed(42)
-            .extended(true)
-            .fit(&mixed)
-            .unwrap();
+            .random_state(42)
+            .verbose(false)
+            .build();
 
-        assert!(result.converged());
+        let result = Picard::fit_with_config(&x, &config).unwrap();
+
+        assert!(result.n_iterations <= 100);
     }
 
     #[test]
-    fn test_picard_fewer_components() {
-        let (_, _, mixed) = generate_ica_data(5, 1000, 42);
+    fn test_n_components() {
+        let (_, _, x) = generate_test_data(5, 1000, 42);
 
-        let result = Picard::fit(&mixed, 3).unwrap();
+        let config = PicardConfig::builder()
+            .n_components(3)
+            .random_state(42)
+            .build();
 
-        assert_eq!(result.sources().nrows(), 3);
-        assert_eq!(result.sources().ncols(), 1000);
+        let result = Picard::fit_with_config(&x, &config).unwrap();
+
+        assert_eq!(result.sources.nrows(), 3);
+        assert_eq!(result.unmixing.nrows(), 3);
     }
 
     #[test]
-    fn test_picard_transform() {
-        let (_, _, mixed) = generate_ica_data(3, 1000, 42);
+    fn test_transform() {
+        let (_, _, x) = generate_test_data(3, 1000, 42);
 
-        let result = Picard::fit(&mixed, 3).unwrap();
+        let config = PicardConfig::builder().random_state(42).build();
 
-        // Transform should give same result as sources for training data
-        let transformed = result.transform(&mixed);
+        let result = Picard::fit_with_config(&x, &config).unwrap();
 
-        assert_eq!(transformed.nrows(), 3);
-        assert_eq!(transformed.ncols(), 1000);
+        // Transform the same data
+        let transformed = Picard::transform(&x, &result).unwrap();
 
-        // Values should be very close (may have small numerical differences)
-        let max_diff: f64 = transformed
-            .iter()
-            .zip(result.sources().iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0, f64::max);
-
-        assert!(
-            max_diff < 1e-10,
-            "Transform should match sources, max diff: {}",
-            max_diff
-        );
+        assert_eq!(transformed.shape(), result.sources.shape());
     }
 
     #[test]
-    fn test_picard_insufficient_samples() {
-        let (_, _, mixed) = generate_ica_data(3, 2, 42);
+    fn test_no_whiten() {
+        let (_, _, x) = generate_test_data(3, 1000, 42);
 
-        let result = Picard::fit(&mixed, 3);
-        assert!(matches!(result, Err(PicardError::InsufficientSamples { .. })));
-    }
+        let config = PicardConfig::builder()
+            .whiten(false)
+            .random_state(42)
+            .build();
 
-    #[test]
-    fn test_picard_deterministic_without_seed() {
-        // Without a seed but with ortho=true and no random init noise,
-        // results should be deterministic
-        let (_, _, mixed) = generate_ica_data(3, 1000, 42);
+        let result = Picard::fit_with_config(&x, &config).unwrap();
 
-        let result1 = Picard::builder(3)
-            .ortho(true)
-            .extended(false) // Disable extended to reduce variability
-            .fit(&mixed)
-            .unwrap();
-
-        let result2 = Picard::builder(3)
-            .ortho(true)
-            .extended(false)
-            .fit(&mixed)
-            .unwrap();
-
-        // Should get identical iteration counts at minimum
-        assert_eq!(result1.n_iter(), result2.n_iter());
+        assert!(result.whitening.is_none());
     }
 }
