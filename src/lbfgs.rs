@@ -1,13 +1,15 @@
+// src/lbfgs.rs
+
 //! L-BFGS optimization for the PICARD algorithm.
 
-use ndarray::{Array1, Array2};
+use faer::{Col, Mat, MatRef};
 
 /// L-BFGS memory storage.
 pub struct LbfgsMemory {
     /// Step differences (s_k = x_{k+1} - x_k).
-    pub s_list: Vec<Array2<f64>>,
+    pub s_list: Vec<Mat<f64>>,
     /// Gradient differences (y_k = g_{k+1} - g_k).
-    pub y_list: Vec<Array2<f64>>,
+    pub y_list: Vec<Mat<f64>>,
     /// Curvature estimates (r_k = 1 / (s_k · y_k)).
     pub r_list: Vec<f64>,
     #[allow(unused)]
@@ -39,8 +41,8 @@ impl LbfgsMemory {
     /// # Arguments
     /// * `s` - Step difference (direction * alpha)
     /// * `y` - Gradient difference
-    pub fn update(&mut self, s: Array2<f64>, y: Array2<f64>) {
-        let sy: f64 = (&s * &y).sum();
+    pub fn update(&mut self, s: Mat<f64>, y: Mat<f64>) {
+        let sy = mat_dot(&s, &y);
 
         // Only update if curvature condition is satisfied
         if sy.abs() > 1e-15 {
@@ -70,6 +72,17 @@ impl LbfgsMemory {
     }
 }
 
+/// Element-wise dot product of two matrices (sum of element-wise products).
+fn mat_dot(a: &Mat<f64>, b: &Mat<f64>) -> f64 {
+    let mut sum = 0.0;
+    for j in 0..a.ncols() {
+        for i in 0..a.nrows() {
+            sum += a[(i, j)] * b[(i, j)];
+        }
+    }
+    sum
+}
+
 /// Compute the L-BFGS search direction.
 ///
 /// # Arguments
@@ -82,13 +95,13 @@ impl LbfgsMemory {
 /// # Returns
 /// * Search direction (negative of preconditioned gradient)
 pub fn compute_direction(
-    g: &Array2<f64>,
-    h: &Array2<f64>,
-    h_off: &Array1<f64>,
+    g: MatRef<'_, f64>,
+    h: MatRef<'_, f64>,
+    h_off: &Col<f64>,
     memory: &LbfgsMemory,
     ortho: bool,
-) -> Array2<f64> {
-    let mut q = g.clone();
+) -> Mat<f64> {
+    let mut q = g.to_owned();
     let mut alpha_list = Vec::with_capacity(memory.len());
 
     // First loop: backward through memory
@@ -99,22 +112,27 @@ pub fn compute_direction(
         .zip(memory.r_list.iter())
         .rev()
     {
-        let alpha = r * (s * &q).sum();
+        let alpha = r * mat_dot(s, &q);
         alpha_list.push(alpha);
-        q = &q - alpha * y;
+        q = &q - y * faer::Scale(alpha);
     }
     alpha_list.reverse();
 
     // Apply preconditioner (inverse Hessian approximation)
     let mut z = if ortho {
         // For orthogonal case, use diagonal scaling
-        let mut z = &q / h;
+        let mut z = Mat::zeros(q.nrows(), q.ncols());
+        for j in 0..q.ncols() {
+            for i in 0..q.nrows() {
+                z[(i, j)] = q[(i, j)] / h[(i, j)];
+            }
+        }
         // Make skew-symmetric
-        z = (&z - &z.t()) / 2.0;
+        z = (&z - z.transpose()) * faer::Scale(0.5);
         z
     } else {
         // Solve the 2x2 systems for each pair of components
-        solve_hessian_system(h, h_off, &q)
+        solve_hessian_system(h, h_off, g)
     };
 
     // Second loop: forward through memory
@@ -125,23 +143,23 @@ pub fn compute_direction(
         .zip(memory.r_list.iter())
         .zip(alpha_list.iter())
     {
-        let beta = r * (y * &z).sum();
-        z = &z + (alpha - beta) * s;
+        let beta = r * mat_dot(y, &z);
+        z = &z + s * faer::Scale(alpha - beta);
     }
 
-    -z
+    z * faer::Scale(-1.0)
 }
 
 /// Solve the Hessian system for the non-orthogonal case.
-fn solve_hessian_system(h: &Array2<f64>, h_off: &Array1<f64>, g: &Array2<f64>) -> Array2<f64> {
+fn solve_hessian_system(h: MatRef<'_, f64>, h_off: &Col<f64>, g: MatRef<'_, f64>) -> Mat<f64> {
     let n = h.nrows();
-    let mut result = Array2::zeros((n, n));
+    let mut result = Mat::zeros(n, n);
 
     for i in 0..n {
         for j in 0..n {
-            let det = h[[i, j]] * h[[j, i]] - h_off[i] * h_off[j];
+            let det = h[(i, j)] * h[(j, i)] - h_off[i] * h_off[j];
             if det.abs() > 1e-15 {
-                result[[i, j]] = (h[[j, i]] * g[[i, j]] - h_off[i] * g[[j, i]]) / det;
+                result[(i, j)] = (h[(j, i)] * g[(i, j)] - h_off[i] * g[(j, i)]) / det;
             }
         }
     }
@@ -152,18 +170,18 @@ fn solve_hessian_system(h: &Array2<f64>, h_off: &Array1<f64>, g: &Array2<f64>) -
 /// Regularize the Hessian approximation.
 ///
 /// Ensures eigenvalues are at least `lambda_min` for numerical stability.
-pub fn regularize_hessian(h: &mut Array2<f64>, h_off: &Array1<f64>, lambda_min: f64) {
+pub fn regularize_hessian(h: &mut Mat<f64>, h_off: &Col<f64>, lambda_min: f64) {
     let n = h.nrows();
 
     for i in 0..n {
         for j in 0..n {
             if i != j {
-                let diff = h[[i, j]] - h[[j, i]];
+                let diff = h[(i, j)] - h[(j, i)];
                 let discr = (diff * diff + 4.0 * h_off[i] * h_off[j]).sqrt();
-                let eigenvalue = 0.5 * (h[[i, j]] + h[[j, i]] - discr);
+                let eigenvalue = 0.5 * (h[(i, j)] + h[(j, i)] - discr);
 
                 if eigenvalue < lambda_min {
-                    h[[i, j]] += lambda_min - eigenvalue;
+                    h[(i, j)] += lambda_min - eigenvalue;
                 }
             }
         }
@@ -173,15 +191,15 @@ pub fn regularize_hessian(h: &mut Array2<f64>, h_off: &Array1<f64>, lambda_min: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+    use faer::mat;
 
     #[test]
     fn test_lbfgs_memory() {
         let mut memory = LbfgsMemory::new(3);
         assert!(memory.is_empty());
 
-        let s = array![[1.0, 0.0], [0.0, 1.0]];
-        let y = array![[0.5, 0.0], [0.0, 0.5]];
+        let s = mat![[1.0, 0.0], [0.0, 1.0]];
+        let y = mat![[0.5, 0.0], [0.0, 0.5]];
         memory.update(s, y);
 
         assert_eq!(memory.len(), 1);
@@ -192,8 +210,8 @@ mod tests {
         let mut memory = LbfgsMemory::new(2);
 
         for i in 0..5 {
-            let s = Array2::from_elem((2, 2), i as f64 + 1.0);
-            let y = Array2::from_elem((2, 2), 1.0);
+            let s = Mat::from_fn(2, 2, |_, _| i as f64 + 1.0);
+            let y = Mat::from_fn(2, 2, |_, _| 1.0);
             memory.update(s, y);
         }
 

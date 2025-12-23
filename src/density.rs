@@ -5,7 +5,7 @@
 //! The density function determines the non-linearity used in the ICA algorithm.
 //! Different densities are suited for different source distributions.
 
-use ndarray::{Array1, Array2};
+use faer::{Col, Mat, MatRef};
 
 /// Trait for density functions used in ICA.
 ///
@@ -13,12 +13,12 @@ use ndarray::{Array1, Array2};
 /// score function (derivative of log-likelihood), and score derivative.
 pub trait Density: Clone + Send + Sync {
     /// Compute the log-likelihood for a 1D signal.
-    fn log_lik(&self, y: &Array1<f64>) -> Array1<f64>;
+    fn log_lik(&self, y: &Col<f64>) -> Col<f64>;
 
     /// Compute the score function and its derivative for a 2D signal matrix.
     ///
     /// Returns `(score, score_derivative)` where both have the same shape as input.
-    fn score_and_der(&self, y: &Array2<f64>) -> (Array2<f64>, Array2<f64>);
+    fn score_and_der(&self, y: MatRef<'_, f64>) -> (Mat<f64>, Mat<f64>);
 }
 
 /// Hyperbolic tangent density.
@@ -47,18 +47,30 @@ impl Tanh {
 }
 
 impl Density for Tanh {
-    fn log_lik(&self, y: &Array1<f64>) -> Array1<f64> {
+    fn log_lik(&self, y: &Col<f64>) -> Col<f64> {
         let alpha = self.alpha;
-        y.mapv(|v| {
+        Col::from_fn(y.nrows(), |i| {
+            let v = y[i];
             let abs_y = v.abs();
             abs_y + (1.0 + (-2.0 * alpha * abs_y).exp()).ln() / alpha
         })
     }
 
-    fn score_and_der(&self, y: &Array2<f64>) -> (Array2<f64>, Array2<f64>) {
+    fn score_and_der(&self, y: MatRef<'_, f64>) -> (Mat<f64>, Mat<f64>) {
         let alpha = self.alpha;
-        let score = y.mapv(|v| (alpha * v).tanh());
-        let score_der = score.mapv(|s| alpha * (1.0 - s * s));
+        let (nrows, ncols) = (y.nrows(), y.ncols());
+        
+        let mut score = Mat::zeros(nrows, ncols);
+        let mut score_der = Mat::zeros(nrows, ncols);
+        
+        for j in 0..ncols {
+            for i in 0..nrows {
+                let s = (alpha * y[(i, j)]).tanh();
+                score[(i, j)] = s;
+                score_der[(i, j)] = alpha * (1.0 - s * s);
+            }
+        }
+        
         (score, score_der)
     }
 }
@@ -88,17 +100,31 @@ impl Exp {
 }
 
 impl Density for Exp {
-    fn log_lik(&self, y: &Array1<f64>) -> Array1<f64> {
+    fn log_lik(&self, y: &Col<f64>) -> Col<f64> {
         let a = self.alpha;
-        y.mapv(|v| -(-a * v * v / 2.0).exp() / a)
+        Col::from_fn(y.nrows(), |i| {
+            let v = y[i];
+            -(-a * v * v / 2.0).exp() / a
+        })
     }
 
-    fn score_and_der(&self, y: &Array2<f64>) -> (Array2<f64>, Array2<f64>) {
+    fn score_and_der(&self, y: MatRef<'_, f64>) -> (Mat<f64>, Mat<f64>) {
         let a = self.alpha;
-        let y_sq = y.mapv(|v| v * v);
-        let k = y_sq.mapv(|v| (-a / 2.0 * v).exp());
-        let score = y * &k;
-        let score_der = (1.0 - a * &y_sq) * k;
+        let (nrows, ncols) = (y.nrows(), y.ncols());
+        
+        let mut score = Mat::zeros(nrows, ncols);
+        let mut score_der = Mat::zeros(nrows, ncols);
+        
+        for j in 0..ncols {
+            for i in 0..nrows {
+                let v = y[(i, j)];
+                let y_sq = v * v;
+                let k = (-a / 2.0 * y_sq).exp();
+                score[(i, j)] = v * k;
+                score_der[(i, j)] = (1.0 - a * y_sq) * k;
+            }
+        }
+        
         (score, score_der)
     }
 }
@@ -119,13 +145,27 @@ impl Cube {
 }
 
 impl Density for Cube {
-    fn log_lik(&self, y: &Array1<f64>) -> Array1<f64> {
-        y.mapv(|v| v.powi(4) / 4.0)
+    fn log_lik(&self, y: &Col<f64>) -> Col<f64> {
+        Col::from_fn(y.nrows(), |i| {
+            let v = y[i];
+            v.powi(4) / 4.0
+        })
     }
 
-    fn score_and_der(&self, y: &Array2<f64>) -> (Array2<f64>, Array2<f64>) {
-        let score = y.mapv(|v| v.powi(3));
-        let score_der = y.mapv(|v| 3.0 * v * v);
+    fn score_and_der(&self, y: MatRef<'_, f64>) -> (Mat<f64>, Mat<f64>) {
+        let (nrows, ncols) = (y.nrows(), y.ncols());
+        
+        let mut score = Mat::zeros(nrows, ncols);
+        let mut score_der = Mat::zeros(nrows, ncols);
+        
+        for j in 0..ncols {
+            for i in 0..nrows {
+                let v = y[(i, j)];
+                score[(i, j)] = v.powi(3);
+                score_der[(i, j)] = 3.0 * v * v;
+            }
+        }
+        
         (score, score_der)
     }
 }
@@ -176,7 +216,7 @@ impl DensityType {
     }
 
     /// Compute the log-likelihood.
-    pub fn log_lik(&self, y: &Array1<f64>) -> Array1<f64> {
+    pub fn log_lik(&self, y: &Col<f64>) -> Col<f64> {
         match self {
             DensityType::Tanh(d) => d.log_lik(y),
             DensityType::Exp(d) => d.log_lik(y),
@@ -185,7 +225,7 @@ impl DensityType {
     }
 
     /// Compute the score function and its derivative.
-    pub fn score_and_der(&self, y: &Array2<f64>) -> (Array2<f64>, Array2<f64>) {
+    pub fn score_and_der(&self, y: MatRef<'_, f64>) -> (Mat<f64>, Mat<f64>) {
         match self {
             DensityType::Tanh(d) => d.score_and_der(y),
             DensityType::Exp(d) => d.score_and_der(y),

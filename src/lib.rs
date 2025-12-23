@@ -14,14 +14,14 @@
 //!
 //! ```rust,no_run
 //! use picard::{Picard, PicardConfig};
-//! use ndarray::Array2;
+//! use faer::Mat;
 //!
 //! # fn main() -> Result<(), picard::PicardError> {
 //! // Generate some test data (n_features x n_samples)
-//! let x = Array2::<f64>::zeros((10, 1000));
+//! let x = Mat::<f64>::zeros(10, 1000);
 //!
 //! // Fit ICA with default settings
-//! let result = Picard::fit(&x)?;
+//! let result = Picard::fit(x.as_ref())?;
 //!
 //! // Or with custom configuration
 //! let config = PicardConfig::builder()
@@ -29,7 +29,7 @@
 //!     .max_iter(200)
 //!     .ortho(true)
 //!     .build();
-//! let result = Picard::fit_with_config(&x, &config)?;
+//! let result = Picard::fit_with_config(x.as_ref(), &config)?;
 //!
 //! // Access results
 //! let sources = &result.sources;
@@ -57,5 +57,5 @@ pub use solver::Picard;
 // Utility functions
 pub mod utils;
 
-// Re-export ndarray for convenience
-pub use ndarray;
+// Re-export faer for convenience
+pub use faer;

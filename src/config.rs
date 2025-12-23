@@ -4,7 +4,7 @@
 
 use crate::density::DensityType;
 use crate::error::{PicardError, Result};
-use ndarray::Array2;
+use faer::Mat;
 
 /// Configuration parameters for the PICARD algorithm.
 #[derive(Clone)]
@@ -44,7 +44,7 @@ pub struct PicardConfig {
     pub lambda_min: f64,
 
     /// Initial unmixing matrix. If None, uses random initialization.
-    pub w_init: Option<Array2<f64>>,
+    pub w_init: Option<Mat<f64>>,
 
     /// Number of FastICA iterations before PICARD. If None, skip FastICA.
     pub fastica_it: Option<usize>,
@@ -209,7 +209,7 @@ impl ConfigBuilder {
     }
 
     /// Set the initial unmixing matrix.
-    pub fn w_init(mut self, w_init: Array2<f64>) -> Self {
+    pub fn w_init(mut self, w_init: Mat<f64>) -> Self {
         self.config.w_init = Some(w_init);
         self
     }

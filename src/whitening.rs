@@ -3,15 +3,15 @@
 //! Data preprocessing: centering and whitening.
 
 use crate::error::{PicardError, Result};
-use ndarray::{Array1, Array2, Axis};
-use ndarray_linalg::SVD;
+use faer::{Col, Mat, MatRef};
+use faer::matrix_free::LinOp;
 
 /// Result of whitening transformation.
 pub struct WhiteningResult {
     /// Whitened data matrix.
-    pub data: Array2<f64>,
+    pub data: Mat<f64>,
     /// Whitening matrix K (n_components × n_features).
-    pub whitening_matrix: Array2<f64>,
+    pub whitening_matrix: Mat<f64>,
 }
 
 /// Center the data by subtracting the mean of each row.
@@ -21,13 +21,24 @@ pub struct WhiteningResult {
 ///
 /// # Returns
 /// * Tuple of (centered_data, mean_vector)
-pub fn center(x: &Array2<f64>) -> (Array2<f64>, Array1<f64>) {
-    let mean = x.mean_axis(Axis(1)).unwrap();
-    let mut centered = x.clone();
+pub fn center(x: MatRef<'_, f64>) -> (Mat<f64>, Col<f64>) {
+    let (nrows, ncols) = (x.nrows(), x.ncols());
 
-    for i in 0..x.nrows() {
-        for j in 0..x.ncols() {
-            centered[[i, j]] -= mean[i];
+    // Compute row means
+    let mut mean = Col::zeros(nrows);
+    for i in 0..nrows {
+        let mut sum = 0.0;
+        for j in 0..ncols {
+            sum += x[(i, j)];
+        }
+        mean[i] = sum / ncols as f64;
+    }
+
+    // Center the data
+    let mut centered = Mat::zeros(nrows, ncols);
+    for j in 0..ncols {
+        for i in 0..nrows {
+            centered[(i, j)] = x[(i, j)] - mean[i];
         }
     }
 
@@ -45,7 +56,7 @@ pub fn center(x: &Array2<f64>) -> (Array2<f64>, Array1<f64>) {
 ///
 /// # Returns
 /// * `WhiteningResult` containing whitened data and whitening matrix
-pub fn whiten(x: &Array2<f64>, n_components: usize) -> Result<WhiteningResult> {
+pub fn whiten(x: MatRef<'_, f64>, n_components: usize) -> Result<WhiteningResult> {
     let (n_features, n_samples) = (x.nrows(), x.ncols());
 
     if n_components > n_features {
@@ -57,23 +68,22 @@ pub fn whiten(x: &Array2<f64>, n_components: usize) -> Result<WhiteningResult> {
         });
     }
 
-    // SVD decomposition
-    let (u, s, _) = x
-        .svd(true, false)
-        .map_err(|e| PicardError::ComputationError {
-            message: format!("SVD failed: {}", e),
-        })?;
+    // Thin SVD decomposition
+    let svd = x.thin_svd()?;
+    let u = svd.U();
+    let s = svd.S();
 
-    let u = u.ok_or_else(|| PicardError::ComputationError {
-        message: "SVD did not return U matrix".into(),
-    })?;
+    // s is a diagonal matrix, get the number of singular values
+    let num_singular_values = s.ncols().min(s.nrows());
 
     // Check for near-zero singular values
-    let min_sv = s
-        .iter()
-        .take(n_components)
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
+    let mut min_sv = f64::INFINITY;
+    for i in 0..n_components.min(num_singular_values) {
+        let sv = s[i];
+        if sv < min_sv {
+            min_sv = sv;
+        }
+    }
     if min_sv < 1e-10 {
         return Err(PicardError::SingularMatrix);
     }
@@ -81,33 +91,34 @@ pub fn whiten(x: &Array2<f64>, n_components: usize) -> Result<WhiteningResult> {
     // Construct whitening matrix K = (U / s)^T[:n_components]
     // Scaled by sqrt(n_samples) for unit variance
     let scale = (n_samples as f64).sqrt();
-    let mut k = Array2::zeros((n_components, n_features));
+    let mut k = Mat::zeros(n_components, n_features);
 
     for i in 0..n_components {
         for j in 0..n_features {
-            k[[i, j]] = u[[j, i]] / s[i] * scale;
+            k[(i, j)] = u[(j, i)] / s[i] * scale;
         }
     }
 
     // Enforce fixed sign for reproducibility (match MATLAB convention)
     for i in 0..k.nrows() {
-        let max_idx = k
-            .row(i)
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-            .map(|(idx, _)| idx)
-            .unwrap();
+        let mut max_idx = 0;
+        let mut max_val = 0.0;
+        for j in 0..k.ncols() {
+            if k[(i, j)].abs() > max_val {
+                max_val = k[(i, j)].abs();
+                max_idx = j;
+            }
+        }
 
-        if k[[i, max_idx]] < 0.0 {
+        if k[(i, max_idx)] < 0.0 {
             for j in 0..k.ncols() {
-                k[[i, j]] = -k[[i, j]];
+                k[(i, j)] = -k[(i, j)];
             }
         }
     }
 
     // Apply whitening
-    let whitened = k.dot(x);
+    let whitened = &k * x;
 
     Ok(WhiteningResult {
         data: whitened,
@@ -118,34 +129,43 @@ pub fn whiten(x: &Array2<f64>, n_components: usize) -> Result<WhiteningResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+    use faer::mat;
 
     #[test]
     fn test_center() {
-        let x = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
-        let (centered, mean) = center(&x);
+        let x = mat![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let (centered, mean) = center(x.as_ref());
 
         assert!((mean[0] - 2.0).abs() < 1e-10);
         assert!((mean[1] - 5.0).abs() < 1e-10);
 
         // Centered data should have zero mean
-        let new_mean = centered.mean_axis(Axis(1)).unwrap();
-        assert!(new_mean[0].abs() < 1e-10);
-        assert!(new_mean[1].abs() < 1e-10);
+        let mut new_mean_0 = 0.0;
+        let mut new_mean_1 = 0.0;
+        for j in 0..centered.ncols() {
+            new_mean_0 += centered[(0, j)];
+            new_mean_1 += centered[(1, j)];
+        }
+        new_mean_0 /= centered.ncols() as f64;
+        new_mean_1 /= centered.ncols() as f64;
+
+        assert!(new_mean_0.abs() < 1e-10);
+        assert!(new_mean_1.abs() < 1e-10);
     }
 
     #[test]
     fn test_whiten() {
-        let x = array![
+        let x = mat![
             [1.0, 2.0, 3.0, 4.0],
             [2.0, 4.0, 6.0, 8.0],
             [1.0, 3.0, 2.0, 4.0]
         ];
-        let (centered, _) = center(&x);
-        let result = whiten(&centered, 2).unwrap();
+        let (centered, _) = center(x.as_ref());
+        let result = whiten(centered.as_ref(), 2).unwrap();
 
         assert_eq!(result.data.nrows(), 2);
         assert_eq!(result.data.ncols(), 4);
-        assert_eq!(result.whitening_matrix.shape(), &[2, 3]);
+        assert_eq!(result.whitening_matrix.nrows(), 2);
+        assert_eq!(result.whitening_matrix.ncols(), 3);
     }
 }

@@ -8,7 +8,7 @@ use crate::math::sym_decorrelation;
 use crate::result::PicardResult;
 use crate::whitening::{center, whiten};
 
-use ndarray::{Array2, Axis};
+use faer::{Mat, MatRef};
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -27,7 +27,7 @@ impl Picard {
     ///
     /// # Returns
     /// * `PicardResult` containing unmixing matrix, sources, etc.
-    pub fn fit(x: &Array2<f64>) -> Result<PicardResult> {
+    pub fn fit(x: MatRef<'_, f64>) -> Result<PicardResult> {
         Self::fit_with_config(x, &PicardConfig::default())
     }
 
@@ -39,7 +39,7 @@ impl Picard {
     ///
     /// # Returns
     /// * `PicardResult` containing unmixing matrix, sources, etc.
-    pub fn fit_with_config(x: &Array2<f64>, config: &PicardConfig) -> Result<PicardResult> {
+    pub fn fit_with_config(x: MatRef<'_, f64>, config: &PicardConfig) -> Result<PicardResult> {
         config.validate()?;
 
         let (n, p) = (x.nrows(), x.ncols());
@@ -75,12 +75,12 @@ impl Picard {
             let (centered, mean) = center(x);
             (centered, Some(mean))
         } else {
-            (x.clone(), None)
+            (x.to_owned(), None)
         };
 
         // Whiten the data
         let (x1, k) = if config.whiten {
-            let whitening_result = whiten(&x1, n_components)?;
+            let whitening_result = whiten(x1.as_ref(), n_components)?;
             (
                 whitening_result.data,
                 Some(whitening_result.whitening_matrix),
@@ -94,11 +94,12 @@ impl Picard {
         // Initialize unmixing matrix
         let w_init = match &config.w_init {
             Some(w) => {
-                if w.shape() != [actual_components, actual_components] {
+                if w.nrows() != actual_components || w.ncols() != actual_components {
                     return Err(PicardError::InvalidDimensions {
                         message: format!(
-                            "w_init shape {:?} doesn't match expected ({}, {})",
-                            w.shape(),
+                            "w_init shape ({}, {}) doesn't match expected ({}, {})",
+                            w.nrows(),
+                            w.ncols(),
                             actual_components,
                             actual_components
                         ),
@@ -107,13 +108,13 @@ impl Picard {
                 w.clone()
             }
             None => {
-                let mut w = Array2::zeros((actual_components, actual_components));
-                for i in 0..actual_components {
-                    for j in 0..actual_components {
-                        w[[i, j]] = rng.sample(StandardNormal);
+                let mut w = Mat::zeros(actual_components, actual_components);
+                for j in 0..actual_components {
+                    for i in 0..actual_components {
+                        w[(i, j)] = rng.sample(StandardNormal);
                     }
                 }
-                sym_decorrelation(&w)?
+                sym_decorrelation(w.as_ref())?
             }
         };
 
@@ -122,17 +123,17 @@ impl Picard {
             if config.verbose {
                 println!("Running {} iterations of FastICA...", fastica_it);
             }
-            ica_par(&x1, &config.density, fastica_it, &w_init, config.verbose)?
+            ica_par(x1.as_ref(), &config.density, fastica_it, w_init.as_ref(), config.verbose)?
         } else {
             w_init
         };
 
         // Apply initial transformation
-        let x1 = w_init.dot(&x1);
+        let x1 = &w_init * &x1;
 
         // Covariance for extended ICA
         let covariance = if extended && config.whiten {
-            Some(Array2::eye(actual_components))
+            Some(Mat::<f64>::identity(actual_components, actual_components))
         } else {
             None
         };
@@ -143,7 +144,7 @@ impl Picard {
         }
 
         let (y, w, info) = core::run(
-            &x1,
+            x1.as_ref(),
             &config.density,
             config.ortho,
             extended,
@@ -153,11 +154,11 @@ impl Picard {
             config.lambda_min,
             config.ls_tries,
             config.verbose,
-            covariance.as_ref(),
+            covariance.as_ref().map(|c| c.as_ref()),
         );
 
         // Combine transformations
-        let w = w.dot(&w_init);
+        let w = &w * &w_init;
 
         if !info.converged && config.verbose {
             eprintln!(
@@ -187,49 +188,60 @@ impl Picard {
     ///
     /// # Returns
     /// * Transformed data (n_components, n_samples)
-    pub fn transform(x: &Array2<f64>, result: &PicardResult) -> Result<Array2<f64>> {
-        let mut x = x.clone();
+    pub fn transform(x: MatRef<'_, f64>, result: &PicardResult) -> Result<Mat<f64>> {
+        let mut x = x.to_owned();
 
         // Subtract mean if available
         if let Some(ref mean) = result.mean {
-            for i in 0..x.nrows() {
-                for j in 0..x.ncols() {
-                    x[[i, j]] -= mean[i];
+            for j in 0..x.ncols() {
+                for i in 0..x.nrows() {
+                    x[(i, j)] -= mean[i];
                 }
             }
         }
 
         // Apply full unmixing
         let w = result.full_unmixing();
-        Ok(w.dot(&x))
+        Ok(&w * &x)
     }
 }
 
 /// FastICA parallel iteration (used for initialization).
 fn ica_par(
-    x: &Array2<f64>,
+    x: MatRef<'_, f64>,
     density: &DensityType,
     max_iter: usize,
-    w_init: &Array2<f64>,
+    w_init: MatRef<'_, f64>,
     verbose: bool,
-) -> Result<Array2<f64>> {
+) -> Result<Mat<f64>> {
     let mut w = sym_decorrelation(w_init)?;
     let p = x.ncols() as f64;
 
     for _ in 0..max_iter {
-        let wx = w.dot(x);
-        let (gwtx, g_wtx) = density.score_and_der(&wx);
-        let g_wtx_mean = g_wtx.mean_axis(Axis(1)).unwrap();
+        let wx = &w * x;
+        let (gwtx, g_wtx) = density.score_and_der(wx.as_ref());
+
+        // Compute mean along axis 1
+        let n = w.nrows();
+        let t = g_wtx.ncols();
+        let mut g_wtx_mean = faer::Col::zeros(n);
+        for i in 0..n {
+            let mut sum = 0.0;
+            for j in 0..t {
+                sum += g_wtx[(i, j)];
+            }
+            g_wtx_mean[i] = sum / t as f64;
+        }
 
         // C = E[g(Wx)X^T] - E[g'(Wx)] * W
-        let mut c = gwtx.dot(&x.t()) / p;
+        let mut c = &gwtx * x.transpose() * faer::Scale(1.0 / p);
         for i in 0..w.nrows() {
             for j in 0..w.ncols() {
-                c[[i, j]] -= g_wtx_mean[i] * w[[i, j]];
+                c[(i, j)] -= g_wtx_mean[i] * w[(i, j)];
             }
         }
 
-        w = sym_decorrelation(&c)?;
+        w = sym_decorrelation(c.as_ref())?;
     }
 
     if verbose {
@@ -242,36 +254,34 @@ fn ica_par(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::Array;
-    use rand_distr::Uniform;
 
     fn generate_test_data(
         n: usize,
         t: usize,
         seed: u64,
-    ) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
+    ) -> (Mat<f64>, Mat<f64>, Mat<f64>) {
         let mut rng = StdRng::seed_from_u64(seed);
 
         // Generate Laplacian-like sources
-        let mut s = Array2::zeros((n, t));
+        let mut s = Mat::zeros(n, t);
         for i in 0..n {
             for j in 0..t {
                 let u: f64 = rng.gen_range(0.0..1.0);
                 let sign = if rng.gen::<bool>() { 1.0 } else { -1.0 };
-                s[[i, j]] = sign * (-u.ln());
+                s[(i, j)] = sign * (-u.ln());
             }
         }
 
         // Generate mixing matrix
-        let mut a = Array2::zeros((n, n));
+        let mut a = Mat::zeros(n, n);
         for i in 0..n {
             for j in 0..n {
-                a[[i, j]] = rng.sample(StandardNormal);
+                a[(i, j)] = rng.sample(StandardNormal);
             }
         }
 
         // Mix signals
-        let x = a.dot(&s);
+        let x = &a * &s;
 
         (s, a, x)
     }
@@ -280,7 +290,7 @@ mod tests {
     fn test_fit_default() {
         let (_, _, x) = generate_test_data(3, 1000, 42);
 
-        let result = Picard::fit(&x).unwrap();
+        let result = Picard::fit(x.as_ref()).unwrap();
 
         assert_eq!(result.sources.nrows(), 3);
         assert_eq!(result.sources.ncols(), 1000);
@@ -298,7 +308,7 @@ mod tests {
             .verbose(false)
             .build();
 
-        let result = Picard::fit_with_config(&x, &config).unwrap();
+        let result = Picard::fit_with_config(x.as_ref(), &config).unwrap();
 
         assert!(result.n_iterations <= 100);
     }
@@ -312,7 +322,7 @@ mod tests {
             .random_state(42)
             .build();
 
-        let result = Picard::fit_with_config(&x, &config).unwrap();
+        let result = Picard::fit_with_config(x.as_ref(), &config).unwrap();
 
         assert_eq!(result.sources.nrows(), 3);
         assert_eq!(result.unmixing.nrows(), 3);
@@ -324,12 +334,13 @@ mod tests {
 
         let config = PicardConfig::builder().random_state(42).build();
 
-        let result = Picard::fit_with_config(&x, &config).unwrap();
+        let result = Picard::fit_with_config(x.as_ref(), &config).unwrap();
 
         // Transform the same data
-        let transformed = Picard::transform(&x, &result).unwrap();
+        let transformed = Picard::transform(x.as_ref(), &result).unwrap();
 
-        assert_eq!(transformed.shape(), result.sources.shape());
+        assert_eq!(transformed.nrows(), result.sources.nrows());
+        assert_eq!(transformed.ncols(), result.sources.ncols());
     }
 
     #[test]
@@ -341,7 +352,7 @@ mod tests {
             .random_state(42)
             .build();
 
-        let result = Picard::fit_with_config(&x, &config).unwrap();
+        let result = Picard::fit_with_config(x.as_ref(), &config).unwrap();
 
         assert!(result.whitening.is_none());
     }

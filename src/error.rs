@@ -75,5 +75,22 @@ impl fmt::Display for PicardError {
 
 impl std::error::Error for PicardError {}
 
+// Implement From for faer's error types
+impl From<faer::linalg::svd::SvdError> for PicardError {
+    fn from(e: faer::linalg::svd::SvdError) -> Self {
+        PicardError::ComputationError {
+            message: format!("SVD failed: {:?}", e),
+        }
+    }
+}
+
+impl From<faer::linalg::evd::EvdError> for PicardError {
+    fn from(e: faer::linalg::evd::EvdError) -> Self {
+        PicardError::ComputationError {
+            message: format!("Eigendecomposition failed: {:?}", e),
+        }
+    }
+}
+
 /// Convenience type alias for Results with PicardError.
 pub type Result<T> = std::result::Result<T, PicardError>;

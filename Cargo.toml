@@ -15,8 +15,7 @@ categories = ["science", "algorithms", "mathematics"]
 name = "picard"
 
 [dependencies]
-ndarray = "0.17"
-ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
+faer = "0.23.2"
 rand = "0.9"
 rand_distr = "0.5.1"
 
@@ -27,9 +26,3 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "benchmarks"
 harness = false
-
-[features]
-default = []
-# Alternative BLAS backends
-intel-mkl = ["ndarray-linalg/intel-mkl-system"]
-netlib = ["ndarray-linalg/netlib-system"]
