@@ -1,9 +1,12 @@
+// src/solver.rs
+
 //! Main PICARD solver interface.
 
 use crate::config::PicardConfig;
 use crate::core;
 use crate::density::DensityType;
 use crate::error::{PicardError, Result};
+use crate::jade;
 use crate::math::sym_decorrelation;
 use crate::result::PicardResult;
 use crate::whitening::{center, whiten};
@@ -117,8 +120,14 @@ impl Picard {
             }
         };
 
-        // Optional FastICA pre-iterations
-        let w_init = if let Some(fastica_it) = config.fastica_it {
+        // Optional JADE warm start (takes priority if both specified, but validation prevents this)
+        let w_init = if let Some(jade_it) = config.jade_it {
+            if config.verbose {
+                println!("Running {} iterations of JADE...", jade_it);
+            }
+            jade::jade(&x1, jade_it, 1e-6, config.verbose)?
+        } else if let Some(fastica_it) = config.fastica_it {
+            // Optional FastICA pre-iterations
             if config.verbose {
                 println!("Running {} iterations of FastICA...", fastica_it);
             }
@@ -304,6 +313,48 @@ mod tests {
     }
 
     #[test]
+    fn test_fit_with_jade_warmstart() {
+        let (_, _, x) = generate_test_data(3, 1000, 42);
+
+        let config = PicardConfig::builder()
+            .jade_it(50)
+            .random_state(42)
+            .verbose(false)
+            .build();
+
+        let result = Picard::fit_with_config(&x, &config).unwrap();
+
+        assert_eq!(result.sources.nrows(), 3);
+        assert!(result.converged || result.n_iterations > 0);
+    }
+
+    #[test]
+    fn test_jade_vs_no_warmstart() {
+        let (_, _, x) = generate_test_data(4, 2000, 123);
+
+        // Without warm start
+        let config_plain = PicardConfig::builder()
+            .random_state(42)
+            .verbose(false)
+            .build();
+
+        let result_plain = Picard::fit_with_config(&x, &config_plain).unwrap();
+
+        // With JADE warm start
+        let config_jade = PicardConfig::builder()
+            .jade_it(30)
+            .random_state(42)
+            .verbose(false)
+            .build();
+
+        let result_jade = Picard::fit_with_config(&x, &config_jade).unwrap();
+
+        // JADE should typically help converge faster or with better gradient norm
+        // (This is a soft check - the main goal is that it doesn't break)
+        assert!(result_jade.converged || result_jade.gradient_norm < 1.0);
+    }
+
+    #[test]
     fn test_n_components() {
         let (_, _, x) = generate_test_data(5, 1000, 42);
 
@@ -344,5 +395,15 @@ mod tests {
         let result = Picard::fit_with_config(&x, &config).unwrap();
 
         assert!(result.whitening.is_none());
+    }
+
+    #[test]
+    fn test_cannot_use_both_warmstarts() {
+        let config = PicardConfig::builder()
+            .fastica_it(10)
+            .jade_it(10)
+            .build();
+
+        assert!(config.validate().is_err());
     }
 }

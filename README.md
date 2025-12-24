@@ -15,6 +15,7 @@ Based on the paper:
 - **Orthogonal mode (Picard-O)**: Enforces orthogonal unmixing matrix for whitened data
 - **Extended mode**: Handles both sub-Gaussian and super-Gaussian sources automatically
 - **Multiple density functions**: Tanh (default), Exp, and Cube for different source distributions
+- **Warm start options**: FastICA or JADE initialization for improved convergence
 - **Comprehensive output**: Access to unmixing matrices, sources, convergence info, and more
 
 ## Installation
@@ -78,6 +79,33 @@ let config = PicardConfig::builder()
 
 let result = Picard::fit_with_config(&x, &config)?;
 ```
+
+## Warm Start Options
+
+Picard supports two warm start methods to speed convergence:
+
+### JADE (Joint Approximate Diagonalization of Eigenmatrices)
+```rust
+let config = PicardConfig::builder()
+    .jade_it(50)                // Run 50 JADE iterations first
+    .random_state(42)
+    .build();
+```
+
+JADE uses fourth-order cumulants and Jacobi rotations. It's particularly effective for:
+- Mixed sub-Gaussian and super-Gaussian sources
+- Cases where the sources have distinct kurtosis values
+- Providing a robust starting point for difficult separations
+
+### FastICA
+```rust
+let config = PicardConfig::builder()
+    .fastica_it(10)             // Run 10 FastICA iterations first
+    .random_state(42)
+    .build();
+```
+
+Note: You can use either `jade_it` or `fastica_it`, but not both simultaneously.
 
 ## Density Functions
 
