@@ -213,15 +213,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
-name = "cmake"
-version = "0.1.57"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -877,7 +868,6 @@ dependencies = [
  "intel-mkl-src",
  "katexit",
  "lapack-sys",
- "netlib-src",
  "num-traits",
  "openblas-src",
  "thiserror 2.0.17",
@@ -1005,15 +995,6 @@ dependencies = [
  "num-traits",
  "rand 0.8.5",
  "thiserror 2.0.17",
-]
-
-[[package]]
-name = "netlib-src"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abe2058825b000774d9c99f502accb07e01692d58fc14b92a808b65f82978fbd"
-dependencies = [
- "cmake",
 ]
 
 [[package]]

@@ -29,8 +29,6 @@ name = "benchmarks"
 harness = false
 
 [features]
-default = ["openblas"]
-openblas = ["ndarray-linalg/openblas-system"]
-# Alternative BLAS backends
-intel-mkl = ["ndarray-linalg/intel-mkl-system"]
-netlib = ["ndarray-linalg/netlib-system"]
+default = ["openblas-sys"]
+openblas-sys = ["ndarray-linalg/openblas-system"]
+intel-mkl = ["ndarray-linalg/intel-mkl"]
