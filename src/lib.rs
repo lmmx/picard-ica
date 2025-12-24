@@ -1,5 +1,3 @@
-// src/lib.rs
-
 //! # Picard
 //!
 //! Fast Independent Component Analysis using preconditioned L-BFGS optimization.
@@ -42,6 +40,7 @@ mod config;
 mod core;
 mod density;
 mod error;
+mod jade;
 mod lbfgs;
 mod math;
 mod result;

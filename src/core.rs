@@ -153,6 +153,7 @@ pub fn run(
     };
 
     let mut g_old: Option<Array2<f64>> = None;
+    let mut prev_step: Option<Array2<f64>> = None;
     let mut n_iter = 0;
 
     for iter in 0..max_iter {
@@ -239,18 +240,22 @@ pub fn run(
             break;
         }
 
-        // Update L-BFGS memory
-        if let Some(ref g_prev) = g_old {
-            let y_diff = &g - g_prev;
-            if let Some(last_step) = memory.s_list.last() {
-                // Already have the step stored, just add gradient diff
-                memory.y_list.push(y_diff.clone());
-                let r = 1.0 / (last_step * &y_diff).sum();
+        // L-BFGS memory update
+        if iter > 0 {
+            if let (Some(step), Some(ref g_prev)) = (prev_step.take(), &g_old) {
+                let y_diff = &g - g_prev;
+                let r = 1.0 / (&step * &y_diff).sum();
                 if r.is_finite() {
+                    // Push s, y, r together
+                    memory.s_list.push(step);
+                    memory.y_list.push(y_diff);
                     memory.r_list.push(r);
-                } else {
-                    // Invalid curvature, pop the step
-                    memory.s_list.pop();
+                    // Trim to size m
+                    if memory.s_list.len() > m {
+                        memory.s_list.remove(0);
+                        memory.y_list.remove(0);
+                        memory.r_list.remove(0);
+                    }
                 }
             }
         }
@@ -298,8 +303,8 @@ pub fn run(
             (result.y, result.w, result.loss, result.step)
         };
 
-        // Store step for next L-BFGS update
-        memory.s_list.push(step);
+        // Store step for next iteration's memory update
+        prev_step = Some(step);
 
         y = new_y;
         w = new_w;

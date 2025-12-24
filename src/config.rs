@@ -49,6 +49,11 @@ pub struct PicardConfig {
     /// Number of FastICA iterations before PICARD. If None, skip FastICA.
     pub fastica_it: Option<usize>,
 
+    /// Number of JADE iterations before PICARD. If None, skip JADE.
+    /// JADE (Joint Approximate Diagonalization of Eigenmatrices) can provide
+    /// a better warm start than FastICA for some data distributions.
+    pub jade_it: Option<usize>,
+
     /// Random seed for reproducibility.
     pub random_state: Option<u64>,
 
@@ -72,6 +77,7 @@ impl Default for PicardConfig {
             lambda_min: 0.01,
             w_init: None,
             fastica_it: None,
+            jade_it: None,
             random_state: None,
             verbose: false,
         }
@@ -121,6 +127,14 @@ impl PicardConfig {
             return Err(PicardError::InvalidConfig {
                 parameter: "m".into(),
                 message: "L-BFGS memory size must be at least 1".into(),
+            });
+        }
+
+        if self.fastica_it.is_some() && self.jade_it.is_some() {
+            return Err(PicardError::InvalidConfig {
+                parameter: "jade_it".into(),
+                message: "cannot use both fastica_it and jade_it; choose one warm start method"
+                    .into(),
             });
         }
 
@@ -215,8 +229,22 @@ impl ConfigBuilder {
     }
 
     /// Set the number of FastICA pre-iterations.
+    ///
+    /// Note: Cannot be used together with `jade_it`.
     pub fn fastica_it(mut self, iterations: usize) -> Self {
         self.config.fastica_it = Some(iterations);
+        self
+    }
+
+    /// Set the number of JADE pre-iterations.
+    ///
+    /// JADE (Joint Approximate Diagonalization of Eigenmatrices) uses
+    /// fourth-order cumulants and Jacobi rotations for joint diagonalization.
+    /// It can provide a better warm start than FastICA for some distributions.
+    ///
+    /// Note: Cannot be used together with `fastica_it`.
+    pub fn jade_it(mut self, iterations: usize) -> Self {
+        self.config.jade_it = Some(iterations);
         self
     }
 
