@@ -16,7 +16,7 @@ name = "picard"
 
 [dependencies]
 ndarray = "0.17"
-ndarray-linalg = { version = "0.18.0", features = ["openblas-system"] }
+ndarray-linalg = "0.18.0"
 rand = "0.9"
 rand_distr = "0.5.1"
 
@@ -29,7 +29,8 @@ name = "benchmarks"
 harness = false
 
 [features]
-default = []
+default = ["openblas"]
+openblas = ["ndarray-linalg/openblas-system"]
 # Alternative BLAS backends
 intel-mkl = ["ndarray-linalg/intel-mkl-system"]
 netlib = ["ndarray-linalg/netlib-system"]
