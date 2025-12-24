@@ -11,6 +11,13 @@ readme = "README.md"
 keywords = ["ica", "signal-processing", "machine-learning"]
 categories = ["science", "algorithms", "mathematics"]
 
+[profile.release]
+codegen-units = 1
+debug = false
+lto = "thin"
+opt-level = 2
+strip = "symbols"
+
 [lib]
 name = "picard"
 

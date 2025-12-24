@@ -243,13 +243,12 @@ pub fn run(
         if let Some(ref g_prev) = g_old {
             let y_diff = &g - g_prev;
             if let Some(last_step) = memory.s_list.last() {
-                // Already have the step stored, just add gradient diff
-                memory.y_list.push(y_diff.clone());
                 let r = 1.0 / (last_step * &y_diff).sum();
                 if r.is_finite() {
+                    memory.y_list.push(y_diff.clone());
                     memory.r_list.push(r);
                 } else {
-                    // Invalid curvature, pop the step
+                    // Invalid curvature, remove the orphaned step
                     memory.s_list.pop();
                 }
             }
@@ -300,6 +299,13 @@ pub fn run(
 
         // Store step for next L-BFGS update
         memory.s_list.push(step);
+
+        // Trim memory to size m
+        while memory.s_list.len() > m && memory.y_list.len() > 0 {
+            memory.s_list.remove(0);
+            memory.y_list.remove(0);
+            memory.r_list.remove(0);
+        }
 
         y = new_y;
         w = new_w;
