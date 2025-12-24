@@ -1,6 +1,6 @@
 [package]
 name = "picard-ica"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Louis Maddox <louismmx@gmail.com>"]
 description = "Fast Independent Component Analysis using preconditioned L-BFGS optimization"
