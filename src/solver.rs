@@ -163,7 +163,7 @@ impl Picard {
             config.ls_tries,
             config.verbose,
             covariance.as_ref(),
-        );
+        )?;
 
         // Combine transformations
         let w = w.dot(&w_init);
