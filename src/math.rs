@@ -87,16 +87,6 @@ pub fn sln_det(m: &Array2<f64>) -> Result<(f64, f64)> {
     })
 }
 
-/// Compute determinant of a square matrix using LAPACK.
-///
-/// For ICA objectives that need log|det|, prefer using `sln_det` directly
-/// to avoid numerical issues with very large or small determinants.
-pub fn determinant(m: &Array2<f64>) -> Result<f64> {
-    m.det().map_err(|e| PicardError::ComputationError {
-        message: format!("LU decomposition failed in determinant computation: {}", e),
-    })
-}
-
 /// Make a matrix skew-symmetric: A <- (A - A^T) / 2
 pub fn skew_symmetric(a: &Array2<f64>) -> Array2<f64> {
     (a - &a.t()) / 2.0
@@ -131,13 +121,6 @@ mod tests {
                 assert!((exp_zero[[i, j]] - expected).abs() < 1e-10);
             }
         }
-    }
-
-    #[test]
-    fn test_determinant() {
-        let m = array![[1.0, 2.0], [3.0, 4.0]];
-        let det = determinant(&m).unwrap();
-        assert!((det - (-2.0)).abs() < 1e-10);
     }
 
     #[test]
