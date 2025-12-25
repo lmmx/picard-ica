@@ -4,8 +4,7 @@
 
 use crate::error::{PicardError, Result};
 use ndarray::Array2;
-use ndarray_linalg::Eigh;
-use ndarray_linalg::UPLO;
+use ndarray_linalg::{Determinant, Eigh, UPLO};
 
 /// Symmetric decorrelation: W <- (W · W^T)^{-1/2} · W
 ///
@@ -74,58 +73,28 @@ pub fn matrix_exp(a: &Array2<f64>) -> Array2<f64> {
     result
 }
 
-/// Compute determinant of a square matrix using LU decomposition.
-pub fn determinant(m: &Array2<f64>) -> f64 {
-    let n = m.nrows();
+/// Compute the signed log-determinant of a square matrix using LAPACK.
+///
+/// Returns (sign, log_abs_det) where:
+/// - sign is 1.0, -1.0, or 0.0
+/// - log_abs_det is ln(|det(m)|)
+///
+/// This is more numerically stable than computing det directly,
+/// especially for the log|det| terms used in ICA objectives.
+pub fn sln_det(m: &Array2<f64>) -> Result<(f64, f64)> {
+    m.sln_det().map_err(|e| PicardError::ComputationError {
+        message: format!("LU decomposition failed in determinant computation: {}", e),
+    })
+}
 
-    if n == 1 {
-        return m[[0, 0]];
-    }
-    if n == 2 {
-        return m[[0, 0]] * m[[1, 1]] - m[[0, 1]] * m[[1, 0]];
-    }
-
-    // LU decomposition with partial pivoting
-    let mut lu = m.clone();
-    let mut det = 1.0;
-
-    for i in 0..n {
-        // Find pivot
-        let mut max_val = lu[[i, i]].abs();
-        let mut max_row = i;
-        for k in (i + 1)..n {
-            if lu[[k, i]].abs() > max_val {
-                max_val = lu[[k, i]].abs();
-                max_row = k;
-            }
-        }
-
-        if max_val < 1e-15 {
-            return 0.0;
-        }
-
-        // Swap rows if needed
-        if max_row != i {
-            for j in 0..n {
-                let tmp = lu[[i, j]];
-                lu[[i, j]] = lu[[max_row, j]];
-                lu[[max_row, j]] = tmp;
-            }
-            det = -det;
-        }
-
-        det *= lu[[i, i]];
-
-        // Eliminate below
-        for k in (i + 1)..n {
-            let factor = lu[[k, i]] / lu[[i, i]];
-            for j in i..n {
-                lu[[k, j]] -= factor * lu[[i, j]];
-            }
-        }
-    }
-
-    det
+/// Compute determinant of a square matrix using LAPACK.
+///
+/// For ICA objectives that need log|det|, prefer using `sln_det` directly
+/// to avoid numerical issues with very large or small determinants.
+pub fn determinant(m: &Array2<f64>) -> Result<f64> {
+    m.det().map_err(|e| PicardError::ComputationError {
+        message: format!("LU decomposition failed in determinant computation: {}", e),
+    })
 }
 
 /// Make a matrix skew-symmetric: A <- (A - A^T) / 2
@@ -167,8 +136,25 @@ mod tests {
     #[test]
     fn test_determinant() {
         let m = array![[1.0, 2.0], [3.0, 4.0]];
-        let det = determinant(&m);
+        let det = determinant(&m).unwrap();
         assert!((det - (-2.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sln_det() {
+        let m = array![[1.0, 2.0], [3.0, 4.0]];
+        let (sign, log_abs) = sln_det(&m).unwrap();
+        assert!((sign - (-1.0)).abs() < 1e-10); // det is negative
+        assert!((log_abs - 2.0_f64.ln()).abs() < 1e-10); // |det| = 2
+    }
+
+    #[test]
+    fn test_sln_det_large_values() {
+        // Test with a matrix that would overflow if computing det directly
+        let m = array![[1e150, 0.0], [0.0, 1e150]];
+        let (sign, log_abs) = sln_det(&m).unwrap();
+        assert!((sign - 1.0).abs() < 1e-10);
+        assert!((log_abs - 2.0 * 150.0 * 10.0_f64.ln()).abs() < 1e-6);
     }
 
     #[test]
