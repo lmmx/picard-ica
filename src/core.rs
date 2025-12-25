@@ -1,8 +1,9 @@
 //! Core PICARD algorithm implementation.
 
 use crate::density::DensityType;
+use crate::error::{PicardError, Result};
 use crate::lbfgs::{compute_direction, regularize_hessian, LbfgsMemory};
-use crate::math::{determinant, matrix_exp, skew_symmetric};
+use crate::math::{matrix_exp, skew_symmetric, sln_det};
 use ndarray::{Array1, Array2, Axis};
 
 /// Information returned from core PICARD iteration.
@@ -17,7 +18,24 @@ pub struct CoreInfo {
     pub signs: Option<Array1<f64>>,
 }
 
+/// Result of computing the loss function.
+pub enum LossResult {
+    /// Successfully computed loss value.
+    Value(f64),
+    /// Matrix is singular - optimization should handle this gracefully.
+    Singular,
+    /// Computation failed with an error.
+    Error(PicardError),
+}
+
 /// Compute the loss function.
+///
+/// Uses LAPACK-backed log-determinant computation for numerical stability.
+/// This avoids the numerical issues with manual LU decomposition and
+/// provides smoother gradients for L-BFGS optimization.
+///
+/// Returns a `LossResult` to distinguish between normal values, singularity,
+/// and actual errors.
 pub fn compute_loss(
     y: &Array2<f64>,
     w: &Array2<f64>,
@@ -25,17 +43,28 @@ pub fn compute_loss(
     signs: &Array1<f64>,
     ortho: bool,
     extended: bool,
-) -> f64 {
+) -> LossResult {
     let n = y.nrows();
     let t = y.ncols() as f64;
 
     // Log-determinant term (only for non-orthogonal)
     let mut loss = if !ortho {
-        let det = determinant(w);
-        if det.abs() < 1e-15 {
-            return f64::MAX;
+        // Use sln_det for numerical stability - it returns (sign, log|det|)
+        // directly, avoiding overflow/underflow issues with large/small determinants
+        match sln_det(w) {
+            Ok((sign, log_abs_det)) => {
+                if sign == 0.0 {
+                    // Matrix is singular
+                    return LossResult::Singular;
+                }
+                // Normal case: -log|det(W)|
+                -log_abs_det
+            }
+            Err(e) => {
+                // LU decomposition failed entirely
+                return LossResult::Error(e);
+            }
         }
-        -det.abs().ln()
     } else {
         0.0
     };
@@ -52,7 +81,18 @@ pub fn compute_loss(
         }
     }
 
-    loss
+    LossResult::Value(loss)
+}
+
+/// Convert LossResult to f64 for use in line search comparisons.
+/// Singular matrices get a large penalty value to push optimization away.
+/// Errors also get a large penalty to avoid that direction.
+fn loss_to_f64(result: LossResult) -> f64 {
+    match result {
+        LossResult::Value(v) => v,
+        LossResult::Singular => 1e15,
+        LossResult::Error(_) => 1e15,
+    }
 }
 
 /// Perform backtracking line search.
@@ -83,7 +123,9 @@ pub fn line_search(
 
         y_new = transform.dot(y);
         w_new = transform.dot(w);
-        new_loss = compute_loss(&y_new, &w_new, density, signs, ortho, extended);
+
+        let loss_result = compute_loss(&y_new, &w_new, density, signs, ortho, extended);
+        new_loss = loss_to_f64(loss_result);
 
         if new_loss < current_loss {
             return LineSearchResult {
@@ -129,7 +171,7 @@ pub fn run(
     ls_tries: usize,
     verbose: bool,
     covariance: Option<&Array2<f64>>,
-) -> (Array2<f64>, Array2<f64>, CoreInfo) {
+) -> Result<(Array2<f64>, Array2<f64>, CoreInfo)> {
     let (n, t) = (x.nrows(), x.ncols());
     let t_f = t as f64;
 
@@ -140,7 +182,17 @@ pub fn run(
     let mut signs = Array1::ones(n);
     let mut old_signs = signs.clone();
 
-    let mut current_loss = compute_loss(&y, &w, density, &signs, ortho, extended);
+    let initial_loss = compute_loss(&y, &w, density, &signs, ortho, extended);
+    let mut current_loss = match initial_loss {
+        LossResult::Value(v) => v,
+        LossResult::Singular => {
+            return Err(PicardError::SingularMatrix);
+        }
+        LossResult::Error(e) => {
+            return Err(e);
+        }
+    };
+
     let mut gradient_norm = 1.0;
     let mut converged = false;
 
@@ -263,7 +315,18 @@ pub fn run(
 
         // Flush memory on sign change
         if extended && sign_change {
-            current_loss = compute_loss(&y, &w, density, &signs, ortho, extended);
+            let loss_result = compute_loss(&y, &w, density, &signs, ortho, extended);
+            current_loss = match loss_result {
+                LossResult::Value(v) => v,
+                LossResult::Singular => {
+                    // During iteration, try to continue rather than fail immediately
+                    // The line search should push us away from singularity
+                    1e15
+                }
+                LossResult::Error(e) => {
+                    return Err(e);
+                }
+            };
             memory.clear();
         }
 
@@ -334,5 +397,5 @@ pub fn run(
         signs: if extended { Some(signs) } else { None },
     };
 
-    (y, w, info)
+    Ok((y, w, info))
 }
