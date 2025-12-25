@@ -42,8 +42,8 @@ impl LbfgsMemory {
     pub fn update(&mut self, s: Array2<f64>, y: Array2<f64>) {
         let sy: f64 = (&s * &y).sum();
 
-        // Only update if curvature condition is satisfied
-        if sy.abs() > 1e-15 {
+        // Only update if curvature condition is satisfied (s·y > 0)
+        if sy > 1e-10 {
             let r = 1.0 / sy;
 
             if self.s_list.len() >= self.max_size {
@@ -133,15 +133,43 @@ pub fn compute_direction(
 }
 
 /// Solve the Hessian system for the non-orthogonal case.
+///
+/// For each (i,j) pair, solves the 2x2 system:
+/// [[h[i,j], h_off[i]], [h_off[j], h[j,i]]] * [x, y]^T = [g[i,j], g[j,i]]^T
+///
+/// Uses a numerically stable approach that avoids hard thresholds.
 fn solve_hessian_system(h: &Array2<f64>, h_off: &Array1<f64>, g: &Array2<f64>) -> Array2<f64> {
     let n = h.nrows();
     let mut result = Array2::zeros((n, n));
 
     for i in 0..n {
         for j in 0..n {
-            let det = h[[i, j]] * h[[j, i]] - h_off[i] * h_off[j];
-            if det.abs() > 1e-15 {
-                result[[i, j]] = (h[[j, i]] * g[[i, j]] - h_off[i] * g[[j, i]]) / det;
+            // 2x2 system: [[a, b], [c, d]] * [x, y]^T = [e, f]^T
+            // where a = h[i,j], b = h_off[i], c = h_off[j], d = h[j,i]
+            //       e = g[i,j], f = g[j,i]
+            let a = h[[i, j]];
+            let b = h_off[i];
+            let c = h_off[j];
+            let d = h[[j, i]];
+            let e = g[[i, j]];
+            let f = g[[j, i]];
+
+            let det = a * d - b * c;
+
+            // Use relative tolerance based on matrix scale
+            // This avoids the sharp threshold that creates discontinuities
+            let scale = (a.abs() + d.abs() + b.abs() + c.abs()) * 0.25;
+            let tol = scale * 1e-12 + 1e-15; // Relative + absolute tolerance
+
+            if det.abs() > tol {
+                // Standard Cramer's rule solution
+                result[[i, j]] = (d * e - b * f) / det;
+            } else {
+                // Near-singular case: use regularized pseudoinverse approach
+                // Add small regularization to make the system well-conditioned
+                let reg = scale * 1e-6 + 1e-12;
+                let det_reg = det + reg.copysign(det + 1e-30);
+                result[[i, j]] = (d * e - b * f) / det_reg;
             }
         }
     }
@@ -152,18 +180,42 @@ fn solve_hessian_system(h: &Array2<f64>, h_off: &Array1<f64>, g: &Array2<f64>) -
 /// Regularize the Hessian approximation.
 ///
 /// Ensures eigenvalues are at least `lambda_min` for numerical stability.
+/// For non-symmetric 2x2 blocks, regularizes both elements symmetrically.
 pub fn regularize_hessian(h: &mut Array2<f64>, h_off: &Array1<f64>, lambda_min: f64) {
     let n = h.nrows();
 
     for i in 0..n {
         for j in 0..n {
             if i != j {
-                let diff = h[[i, j]] - h[[j, i]];
-                let discr = (diff * diff + 4.0 * h_off[i] * h_off[j]).sqrt();
-                let eigenvalue = 0.5 * (h[[i, j]] + h[[j, i]] - discr);
+                // For the 2x2 block [[h[i,j], h_off[i]], [h_off[j], h[j,i]]]
+                // compute the smaller eigenvalue
+                let a = h[[i, j]];
+                let d = h[[j, i]];
+                let bc = h_off[i] * h_off[j];
 
-                if eigenvalue < lambda_min {
-                    h[[i, j]] += lambda_min - eigenvalue;
+                let trace = a + d;
+                let det = a * d - bc;
+
+                // Eigenvalues: (trace ± sqrt(trace² - 4*det)) / 2
+                let discriminant = trace * trace - 4.0 * det;
+
+                if discriminant >= 0.0 {
+                    let sqrt_disc = discriminant.sqrt();
+                    let lambda_min_eigen = 0.5 * (trace - sqrt_disc);
+
+                    if lambda_min_eigen < lambda_min {
+                        // Shift both diagonal elements to ensure minimum eigenvalue
+                        let shift = lambda_min - lambda_min_eigen;
+                        h[[i, j]] += shift;
+                        // Note: we only modify h[i,j] here because h[j,i] will be
+                        // modified when we process the (j,i) pair
+                    }
+                } else {
+                    // Complex eigenvalues (shouldn't happen for well-formed Hessians)
+                    // Regularize conservatively
+                    if h[[i, j]] < lambda_min {
+                        h[[i, j]] = lambda_min;
+                    }
                 }
             }
         }
@@ -199,5 +251,39 @@ mod tests {
 
         // Should only keep last 2
         assert_eq!(memory.len(), 2);
+    }
+
+    #[test]
+    fn test_curvature_condition() {
+        let mut memory = LbfgsMemory::new(3);
+
+        // Positive curvature - should be accepted
+        let s = array![[1.0, 0.0], [0.0, 1.0]];
+        let y = array![[1.0, 0.0], [0.0, 1.0]];
+        memory.update(s.clone(), y);
+        assert_eq!(memory.len(), 1);
+
+        // Negative curvature - should be rejected
+        let y_neg = array![[-1.0, 0.0], [0.0, -1.0]];
+        memory.update(s.clone(), y_neg);
+        assert_eq!(memory.len(), 1); // Still 1, not 2
+
+        // Zero curvature - should be rejected
+        let y_zero = array![[0.0, 1.0], [-1.0, 0.0]]; // Orthogonal to s
+        memory.update(s, y_zero);
+        assert_eq!(memory.len(), 1); // Still 1
+    }
+
+    #[test]
+    fn test_solve_hessian_near_singular() {
+        // Test that near-singular systems don't produce NaN or huge values
+        let h = array![[1.0, 1.0], [1.0, 1.0]]; // Nearly singular when h_off = [1, 1]
+        let h_off = array![0.99, 0.99]; // det ≈ 0.02
+        let g = array![[1.0, 0.0], [0.0, 1.0]];
+
+        let result = solve_hessian_system(&h, &h_off, &g);
+
+        // Should produce finite results
+        assert!(result.iter().all(|&x| x.is_finite()));
     }
 }
