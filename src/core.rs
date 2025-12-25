@@ -158,6 +158,10 @@ pub struct LineSearchResult {
     pub step: Array2<f64>,
 }
 
+/// Minimum curvature threshold for L-BFGS updates.
+/// Updates with s·y below this are rejected to maintain positive definiteness.
+const LBFGS_CURVATURE_MIN: f64 = 1e-10;
+
 /// Run the core PICARD algorithm.
 pub fn run(
     x: &Array2<f64>,
@@ -296,9 +300,12 @@ pub fn run(
         if iter > 0 {
             if let (Some(step), Some(ref g_prev)) = (prev_step.take(), &g_old) {
                 let y_diff = &g - g_prev;
-                let r = 1.0 / (&step * &y_diff).sum();
-                if r.is_finite() {
-                    // Push s, y, r together
+                let sy = (&step * &y_diff).sum();
+
+                // Only accept update if curvature is sufficiently positive
+                // This maintains positive definiteness of the inverse Hessian approximation
+                if sy > LBFGS_CURVATURE_MIN {
+                    let r = 1.0 / sy;
                     memory.s_list.push(step);
                     memory.y_list.push(y_diff);
                     memory.r_list.push(r);
@@ -309,6 +316,8 @@ pub fn run(
                         memory.r_list.remove(0);
                     }
                 }
+                // If curvature condition fails, skip this update
+                // The L-BFGS will use existing memory or fall back to steepest descent
             }
         }
         g_old = Some(g.clone());
